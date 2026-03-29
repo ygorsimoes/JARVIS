@@ -15,13 +15,23 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.19.0"),
     ],
     targets: [
+        .target(
+            name: "FoundationModelsBridgeCore",
+            path: "Sources/FoundationModelsBridgeCore"
+        ),
         .executableTarget(
             name: "FoundationModelsBridge",
             dependencies: [
+                "FoundationModelsBridgeCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Hummingbird", package: "hummingbird"),
             ],
-            path: "Sources"
+            path: "Sources/FoundationModelsBridge"
+        ),
+        .testTarget(
+            name: "FoundationModelsBridgeCoreTests",
+            dependencies: ["FoundationModelsBridgeCore"],
+            path: "Tests/FoundationModelsBridgeCoreTests"
         ),
     ]
 )

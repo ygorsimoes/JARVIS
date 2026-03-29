@@ -1,210 +1,10 @@
 import ArgumentParser
 import Foundation
+import FoundationModelsBridgeCore
 import Hummingbird
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
-
-struct BridgeMessagePayload: Codable, Sendable {
-    let role: String
-    let content: String
-    let metadata: [String: JSONValue]?
-}
-
-enum JSONValue: Codable, Sendable {
-    case string(String)
-    case number(Double)
-    case integer(Int)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .integer(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case let .string(value): try container.encode(value)
-        case let .number(value): try container.encode(value)
-        case let .integer(value): try container.encode(value)
-        case let .bool(value): try container.encode(value)
-        case let .object(value): try container.encode(value)
-        case let .array(value): try container.encode(value)
-        case .null: try container.encodeNil()
-        }
-    }
-}
-
-struct ToolDefinitionPayload: Codable, Sendable {
-    let name: String
-    let description: String?
-    let input_schema: JSONValue?
-}
-
-struct SessionCreateRequest: Codable, Sendable {
-    let session_id: String?
-    let instructions: String?
-    let tools: [ToolDefinitionPayload]?
-}
-
-struct SessionCreateResponse: Codable, Sendable {
-    let session_id: String
-}
-
-struct SessionResponseRequest: Codable, Sendable {
-    let prompt: String?
-    let messages: [BridgeMessagePayload]
-    let stream: Bool?
-}
-
-struct SessionResponseBody: Codable, Sendable {
-    let text: String
-}
-
-struct ToolResultSubmitRequest: Codable, Sendable {
-    let result: JSONValue
-}
-
-struct HealthResponse: Codable, Sendable {
-    let status: String
-    let availability: String
-    let detail: String?
-}
-
-struct SSEEvent: Codable, Sendable {
-    let type: String
-    let text: String?
-    let name: String?
-    let callID: String?
-    let args: JSONValue?
-    let result: JSONValue?
-    let message: String?
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case text
-        case name
-        case callID = "call_id"
-        case args
-        case result
-        case message
-    }
-}
-
-enum BridgeError: Error, LocalizedError {
-    case unsupportedPlatform
-    case modelUnavailable(String)
-    case missingSession(String)
-    case invalidRequest(String)
-    case sessionBusy(String)
-    case cancelled(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedPlatform:
-            return "Foundation Models requires macOS 26 or newer."
-        case let .modelUnavailable(detail):
-            return detail
-        case let .missingSession(sessionID):
-            return "Session not found: \(sessionID)"
-        case let .invalidRequest(message):
-            return message
-        case let .sessionBusy(sessionID):
-            return "Session already has an active response: \(sessionID)"
-        case let .cancelled(sessionID):
-            return "Response cancelled for session: \(sessionID)"
-        }
-    }
-}
-
-extension JSONValue {
-    var stringValue: String? {
-        guard case let .string(value) = self else { return nil }
-        return value
-    }
-
-    var objectValue: [String: JSONValue]? {
-        guard case let .object(value) = self else { return nil }
-        return value
-    }
-
-    var stringArrayValue: [String]? {
-        guard case let .array(values) = self else { return nil }
-        return values.compactMap { $0.stringValue }
-    }
-
-    var serializedString: String {
-        guard let data = try? JSONEncoder().encode(self),
-              let json = String(data: data, encoding: .utf8)
-        else {
-            return "null"
-        }
-        return json
-    }
-
-    var promptText: String {
-        if case let .string(value) = self {
-            return value
-        }
-        return self.serializedString
-    }
-
-    static func fromGeneratedContent(_ content: GeneratedContent) throws -> JSONValue {
-        let data = Data(content.jsonString.utf8)
-        let object = try JSONSerialization.jsonObject(with: data)
-        return try fromJSONObject(object)
-    }
-
-    static func fromJSONObject(_ object: Any) throws -> JSONValue {
-        switch object {
-        case let value as String:
-            return .string(value)
-        case let value as Bool:
-            return .bool(value)
-        case let value as Int:
-            return .integer(value)
-        case let value as Double:
-            return .number(value)
-        case let value as NSNumber:
-            if CFGetTypeID(value) == CFBooleanGetTypeID() {
-                return .bool(value.boolValue)
-            }
-            let doubleValue = value.doubleValue
-            if floor(doubleValue) == doubleValue {
-                return .integer(value.intValue)
-            }
-            return .number(doubleValue)
-        case let value as [Any]:
-            return .array(try value.map { try fromJSONObject($0) })
-        case let value as [String: Any]:
-            return .object(try value.mapValues { try fromJSONObject($0) })
-        case _ as NSNull:
-            return .null
-        default:
-            throw BridgeError.invalidRequest("unsupported JSON value in tool payload")
-        }
-    }
-}
 
 #if canImport(FoundationModels)
 @available(macOS 26.0, *)
@@ -235,12 +35,9 @@ actor ToolInvocationCoordinator {
             encodeSSEBuffer(
                 SSEEvent(
                     type: "tool_call",
-                    text: nil,
                     name: name,
                     callID: callID,
-                    args: arguments,
-                    result: nil,
-                    message: nil
+                    args: arguments
                 )
             )
         )
@@ -253,12 +50,9 @@ actor ToolInvocationCoordinator {
             encodeSSEBuffer(
                 SSEEvent(
                     type: "tool_result",
-                    text: nil,
                     name: name,
                     callID: callID,
-                    args: nil,
-                    result: result,
-                    message: nil
+                    result: result
                 )
             )
         )
@@ -490,62 +284,21 @@ actor BridgeSessionActor {
                 let delta = String(currentContent.dropFirst(previousContent.count))
                 previousContent = currentContent
                 guard !delta.isEmpty else { continue }
-                continuation.yield(
-                    encodeSSEBuffer(
-                        SSEEvent(
-                            type: "response_chunk",
-                            text: delta,
-                            name: nil,
-                            callID: nil,
-                            args: nil,
-                            result: nil,
-                            message: nil
-                        )
-                    )
-                )
+                continuation.yield(encodeSSEBuffer(SSEEvent(type: "response_chunk", text: delta)))
             }
 
-            continuation.yield(
-                encodeSSEBuffer(
-                    SSEEvent(
-                        type: "response_end",
-                        text: nil,
-                        name: nil,
-                        callID: nil,
-                        args: nil,
-                        result: nil,
-                        message: nil
-                    )
-                )
-            )
+            continuation.yield(encodeSSEBuffer(SSEEvent(type: "response_end")))
         } catch is CancellationError {
             continuation.yield(
                 encodeSSEBuffer(
                     SSEEvent(
                         type: "error",
-                        text: nil,
-                        name: nil,
-                        callID: nil,
-                        args: nil,
-                        result: nil,
                         message: BridgeError.cancelled(sessionID).localizedDescription
                     )
                 )
             )
         } catch {
-            continuation.yield(
-                encodeSSEBuffer(
-                    SSEEvent(
-                        type: "error",
-                        text: nil,
-                        name: nil,
-                        callID: nil,
-                        args: nil,
-                        result: nil,
-                        message: error.localizedDescription
-                    )
-                )
-            )
+            continuation.yield(encodeSSEBuffer(SSEEvent(type: "error", message: error.localizedDescription)))
         }
     }
 
@@ -605,13 +358,13 @@ struct FoundationModelsHTTPServer: Sendable {
         }
 
         router.delete("/sessions/:sessionID") { request, _ in
-            let sessionID = try self.extractSessionID(from: request.uri.path, suffix: "")
+            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(from: request.uri.path, suffix: "")
             await self.sessionStore.delete(sessionID)
             return try encodeJSONResponse(["deleted": true])
         }
 
         router.post("/sessions/:sessionID/cancel") { request, _ in
-            let sessionID = try self.extractSessionID(from: request.uri.path, suffix: "/cancel")
+            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(from: request.uri.path, suffix: "/cancel")
             guard let session = await self.sessionStore.get(sessionID) else {
                 return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
             }
@@ -620,7 +373,7 @@ struct FoundationModelsHTTPServer: Sendable {
         }
 
         router.post("/sessions/:sessionID/tool-results/:callID") { request, _ in
-            let (sessionID, callID) = try self.extractSessionIDAndCallID(from: request.uri.path)
+            let (sessionID, callID) = try FoundationModelsBridgeSupport.extractSessionIDAndCallID(from: request.uri.path)
             guard let session = await self.sessionStore.get(sessionID) else {
                 return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
             }
@@ -633,7 +386,7 @@ struct FoundationModelsHTTPServer: Sendable {
         }
 
         router.post("/sessions/:sessionID/responses") { request, _ in
-            let sessionID = try self.extractSessionID(from: request.uri.path, suffix: "/responses")
+            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(from: request.uri.path, suffix: "/responses")
             guard let session = await self.sessionStore.get(sessionID) else {
                 return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
             }
@@ -653,7 +406,8 @@ struct FoundationModelsHTTPServer: Sendable {
         session: BridgeSessionActor,
         payload: SessionResponseRequest
     ) async throws -> Response {
-        let prompt = try self.promptFromPayload(payload)
+        try FoundationModelsBridgeSupport.validateAvailabilityState(self.currentAvailabilityState())
+        let prompt = try FoundationModelsBridgeSupport.prompt(from: payload)
         let fullText = try await session.respond(prompt: prompt)
         return try encodeJSONResponse(SessionResponseBody(text: fullText))
     }
@@ -662,7 +416,8 @@ struct FoundationModelsHTTPServer: Sendable {
         session: BridgeSessionActor,
         payload: SessionResponseRequest
     ) async throws -> Response {
-        let prompt = try self.promptFromPayload(payload)
+        try FoundationModelsBridgeSupport.validateAvailabilityState(self.currentAvailabilityState())
+        let prompt = try FoundationModelsBridgeSupport.prompt(from: payload)
         let stream = try await session.stream(prompt: prompt)
 
         return Response(
@@ -676,119 +431,29 @@ struct FoundationModelsHTTPServer: Sendable {
         )
     }
 
-    private func promptFromPayload(_ payload: SessionResponseRequest) throws -> String {
-        try self.ensureFoundationModelsAvailable()
-        let prompt = payload.prompt ?? payload.messages.last(where: { $0.role == "user" })?.content ?? ""
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeError.invalidRequest("response prompt must not be empty")
-        }
-        return prompt
-    }
-
-    private func ensureFoundationModelsAvailable() throws {
-        guard Self.foundationModelsAvailable else {
-            throw BridgeError.unsupportedPlatform
-        }
-
-        #if canImport(FoundationModels)
-        let availability = SystemLanguageModel.default.availability
-        guard case .available = availability else {
-            throw BridgeError.modelUnavailable(self.availabilityDescription(availability))
-        }
-        #endif
-    }
-
     private func healthPayload() -> HealthResponse {
-        guard Self.foundationModelsAvailable else {
-            return HealthResponse(status: "unavailable", availability: "unsupported", detail: BridgeError.unsupportedPlatform.localizedDescription)
-        }
+        FoundationModelsBridgeSupport.healthPayload(for: self.currentAvailabilityState())
+    }
 
+    private func currentAvailabilityState() -> BridgeAvailabilityState {
         #if canImport(FoundationModels)
         let availability = SystemLanguageModel.default.availability
         switch availability {
         case .available:
-            return HealthResponse(status: "ok", availability: "available", detail: nil)
-        default:
-            return HealthResponse(status: "unavailable", availability: self.availabilityLabel(availability), detail: self.availabilityDescription(availability))
+            return .available
+        case .unavailable(.appleIntelligenceNotEnabled):
+            return .appleIntelligenceNotEnabled
+        case .unavailable(.modelNotReady):
+            return .modelNotReady
+        case .unavailable(.deviceNotEligible):
+            return .deviceNotEligible
+        case .unavailable:
+            return .unavailable
+        @unknown default:
+            return .unknown
         }
         #else
-        return HealthResponse(status: "unavailable", availability: "unsupported", detail: BridgeError.unsupportedPlatform.localizedDescription)
-        #endif
-    }
-
-    private func availabilityLabel(_ availability: SystemLanguageModel.Availability) -> String {
-        switch availability {
-        case .available:
-            return "available"
-        case .unavailable(.appleIntelligenceNotEnabled):
-            return "apple_intelligence_not_enabled"
-        case .unavailable(.modelNotReady):
-            return "model_not_ready"
-        case .unavailable(.deviceNotEligible):
-            return "device_not_eligible"
-        case .unavailable:
-            return "unavailable"
-        @unknown default:
-            return "unknown"
-        }
-    }
-
-    private func availabilityDescription(_ availability: SystemLanguageModel.Availability) -> String {
-        switch availability {
-        case .available:
-            return "Foundation Models is available."
-        case .unavailable(.appleIntelligenceNotEnabled):
-            return "Apple Intelligence must be enabled in System Settings."
-        case .unavailable(.modelNotReady):
-            return "The on-device Foundation model is not ready yet."
-        case .unavailable(.deviceNotEligible):
-            return "This device does not support Apple Intelligence."
-        case .unavailable:
-            return "Foundation Models is unavailable."
-        @unknown default:
-            return "Foundation Models availability is unknown."
-        }
-    }
-
-    private func extractSessionID(from path: String, suffix: String) throws -> String {
-        let prefix = "/sessions/"
-        guard path.hasPrefix(prefix) else {
-            throw BridgeError.invalidRequest("invalid session route: \(path)")
-        }
-        let trimmed = String(path.dropFirst(prefix.count))
-        let sessionID = suffix.isEmpty ? trimmed : String(trimmed.dropLast(suffix.count))
-        let normalized = sessionID.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !normalized.isEmpty else {
-            throw BridgeError.invalidRequest("missing session id in path \(path)")
-        }
-        return normalized
-    }
-
-    private func extractSessionIDAndCallID(from path: String) throws -> (String, String) {
-        let components = path.split(separator: "/")
-        guard components.count == 4,
-              components[0] == "sessions",
-              components[2] == "tool-results"
-        else {
-            throw BridgeError.invalidRequest("invalid tool result route: \(path)")
-        }
-
-        let sessionID = String(components[1])
-        let callID = String(components[3])
-        guard !sessionID.isEmpty, !callID.isEmpty else {
-            throw BridgeError.invalidRequest("missing session id or call id in path \(path)")
-        }
-        return (sessionID, callID)
-    }
-
-    private static var foundationModelsAvailable: Bool {
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, *) {
-            return true
-        }
-        return false
-        #else
-        return false
+        return .unsupported
         #endif
     }
 }
@@ -821,7 +486,7 @@ private func decodeBody<T: Decodable>(_ request: Request, as type: T.Type) async
 }
 
 private func encodeJSONResponse<T: Encodable>(_ value: T) throws -> Response {
-    let data = try JSONEncoder().encode(value)
+    let data = try FoundationModelsBridgeSupport.encodeJSONData(value)
     var buffer = ByteBufferAllocator().buffer(capacity: data.count)
     buffer.writeBytes(data)
     return Response(
@@ -836,9 +501,7 @@ private func errorResponse(status: HTTPResponse.Status, message: String) throws 
 }
 
 private func encodeSSEBuffer<T: Encodable>(_ value: T) -> ByteBuffer {
-    let data = (try? JSONEncoder().encode(value)) ?? Data()
-    let jsonString = String(data: data, encoding: .utf8) ?? "{}"
-    let line = "data: \(jsonString)\n\n"
+    let line = FoundationModelsBridgeSupport.encodeSSELine(value)
     var buffer = ByteBufferAllocator().buffer(capacity: line.utf8.count)
     buffer.writeString(line)
     return buffer

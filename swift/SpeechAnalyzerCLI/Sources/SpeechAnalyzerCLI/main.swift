@@ -1,47 +1,12 @@
 import Foundation
 @preconcurrency import AVFoundation
 import Speech
+import SpeechAnalyzerCore
 import Darwin
 
-struct CLIOptions {
-    var live = false
-    var locale = "pt-BR"
-    var format = "ndjson"
-    var mockTranscript: String?
-}
-
-enum CLIError: Error, LocalizedError {
-    case invalidArguments
-    case unsupportedFormat
-    case unsupportedOS
-    case speechTranscriberUnavailable
-    case unsupportedLocale(String)
-    case noCompatibleAudioFormat
-    case microphonePermissionDenied
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidArguments:
-            return "invalid_arguments"
-        case .unsupportedFormat:
-            return "unsupported_format"
-        case .unsupportedOS:
-            return "unsupported_os"
-        case .speechTranscriberUnavailable:
-            return "speech_transcriber_unavailable"
-        case let .unsupportedLocale(locale):
-            return "unsupported_locale:\(locale)"
-        case .noCompatibleAudioFormat:
-            return "no_compatible_audio_format"
-        case .microphonePermissionDenied:
-            return "microphone_permission_denied"
-        }
-    }
-}
-
 actor EventEmitter {
-    func emit(_ payload: [String: Any]) throws {
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    func emit(_ event: SpeechAnalyzerEvent) throws {
+        let data = try JSONEncoder().encode(event)
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
         fflush(stdout)
@@ -134,7 +99,7 @@ struct SpeechAnalyzerCLI {
             }
 
             if let transcript = options.mockTranscript {
-                try await emitMockSequence(transcript: transcript, emitter: emitter)
+                try await emitEvents(mockSequence(transcript: transcript), emitter: emitter)
                 return
             }
 
@@ -145,14 +110,22 @@ struct SpeechAnalyzerCLI {
 
             throw CLIError.invalidArguments
         } catch {
-            try? await emitter.emit([
-                "type": "error",
-                "message": error.localizedDescription,
-            ])
+            try? await emitter.emit(
+                SpeechAnalyzerEvent(
+                    type: "error",
+                    message: error.localizedDescription
+                )
+            )
             if case CLIError.invalidArguments = error {
-                writeUsage()
+                FileHandle.standardError.write(Data("\(usageText)\n".utf8))
             }
             Foundation.exit(EXIT_FAILURE)
+        }
+    }
+
+    static func emitEvents(_ events: [SpeechAnalyzerEvent], emitter: EventEmitter) async throws {
+        for event in events {
+            try await emitter.emit(event)
         }
     }
 
@@ -195,12 +168,14 @@ struct SpeechAnalyzerCLI {
 
         try capture.start()
         try await analyzer.start(inputSequence: inputSequence)
-        try await emitter.emit([
-            "type": "ready",
-            "locale": locale.identifier(.bcp47),
-            "sample_rate": targetFormat.sampleRate,
-            "channel_count": targetFormat.channelCount,
-        ])
+        try await emitter.emit(
+            SpeechAnalyzerEvent(
+                type: "ready",
+                locale: locale.identifier(.bcp47),
+                sampleRate: targetFormat.sampleRate,
+                channelCount: Int(targetFormat.channelCount)
+            )
+        )
 
         async let transcriberTask: Void = monitorTranscriber(transcriber, emitter: emitter)
         async let detectorTask: Void = monitorDetector(detector, emitter: emitter)
@@ -240,18 +215,22 @@ struct SpeechAnalyzerCLI {
             guard !text.isEmpty else { continue }
 
             if result.isFinal {
-                try await emitter.emit([
-                    "type": "final_transcript",
-                    "text": text,
-                    "is_final": true,
-                ])
+                try await emitter.emit(
+                    SpeechAnalyzerEvent(
+                        type: "final_transcript",
+                        text: text,
+                        isFinal: true
+                    )
+                )
                 lastPartial = ""
             } else if text != lastPartial {
-                try await emitter.emit([
-                    "type": "partial_transcript",
-                    "text": text,
-                    "is_final": false,
-                ])
+                try await emitter.emit(
+                    SpeechAnalyzerEvent(
+                        type: "partial_transcript",
+                        text: text,
+                        isFinal: false
+                    )
+                )
                 lastPartial = text
             }
         }
@@ -264,62 +243,21 @@ struct SpeechAnalyzerCLI {
     ) async throws {
         var lastSpeechState: Bool?
         for try await result in detector.results {
-            try await emitter.emit([
-                "type": "speech_detector_result",
-                "speech_detected": result.speechDetected,
-            ])
+            try await emitter.emit(
+                SpeechAnalyzerEvent(
+                    type: "speech_detector_result",
+                    speechDetected: result.speechDetected
+                )
+            )
 
             if lastSpeechState != result.speechDetected {
                 lastSpeechState = result.speechDetected
-                try await emitter.emit([
-                    "type": result.speechDetected ? "speech_started" : "speech_ended",
-                ])
+                try await emitter.emit(
+                    SpeechAnalyzerEvent(
+                        type: result.speechDetected ? "speech_started" : "speech_ended"
+                    )
+                )
             }
         }
-    }
-
-    static func parseOptions(arguments: [String]) throws -> CLIOptions {
-        var options = CLIOptions()
-        var iterator = arguments.makeIterator()
-
-        while let argument = iterator.next() {
-            switch argument {
-            case "--live":
-                options.live = true
-            case "--locale":
-                guard let locale = iterator.next() else { throw CLIError.invalidArguments }
-                options.locale = locale
-            case "--format":
-                guard let format = iterator.next() else { throw CLIError.invalidArguments }
-                options.format = format
-            case "--mock-transcript":
-                guard let transcript = iterator.next() else { throw CLIError.invalidArguments }
-                options.mockTranscript = transcript
-            default:
-                throw CLIError.invalidArguments
-            }
-        }
-
-        return options
-    }
-
-    static func emitMockSequence(transcript: String, emitter: EventEmitter) async throws {
-        let partial = transcript.split(separator: " ").prefix(3).joined(separator: " ")
-        try await emitter.emit(["type": "speech_started"])
-        try await emitter.emit(["type": "speech_detector_result", "speech_detected": true])
-        if !partial.isEmpty {
-            try await emitter.emit(["type": "partial_transcript", "text": partial, "confidence": 0.80])
-        }
-        try await emitter.emit(["type": "speech_detector_result", "speech_detected": false])
-        try await emitter.emit(["type": "speech_ended"])
-        try await emitter.emit(["type": "final_transcript", "text": transcript, "confidence": 0.98])
-    }
-
-    static func writeUsage() {
-        let usage = """
-        Usage: speechanalyzer-cli --live --locale pt-BR --format ndjson
-               speechanalyzer-cli --mock-transcript \"Que horas sao agora?\"
-        """
-        FileHandle.standardError.write(Data("\(usage)\n".utf8))
     }
 }
