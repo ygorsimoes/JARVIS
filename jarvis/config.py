@@ -51,19 +51,20 @@ class JarvisConfig(BaseSettings):
     llm_fallback_model: str = "claude-3-7-sonnet-20250219"
     llm_response_max_tokens: int = 512
 
-    tts_backend: str = "mlx_audio_kokoro"
-    tts_model: str = "mlx-community/Kokoro-82M-bf16"
-    tts_voice: str = "pm_santa"
-    tts_lang_code: str = "p"
+    tts_backend: str = "mlx_audio_qwen3"
+    tts_model: str = "Qwen/Qwen3-TTS-MLX"
+    tts_voice: str = "default_speaker"
+    tts_lang_code: str = "pt"
     tts_avspeech_voice: Optional[str] = "Luciana"
     tts_avspeech_rate: int = 175
     tts_sample_rate_hz: int = 24000
     playback_backend: str = "sounddevice"
 
     activation_backend: str = Field(
-        default="push_to_talk",
+        default="porcupine",
         validation_alias=AliasChoices("ACTIVATION_BACKEND", "WAKE_WORD_BACKEND"),
     )
+    activation_keyword: str = "jarvis"
     activation_hotkey: str = "<ctrl>+<alt>+space"
     activation_terminal_fallback: bool = True
     allowed_file_roots: List[str] = Field(default_factory=list)

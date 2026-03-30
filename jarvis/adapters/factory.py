@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from ..audio import NoOpPlaybackBackend, SoundDevicePlaybackBackend
 from ..config import JarvisConfig
 from .activation import PushToTalkActivationAdapter
+from .activation.porcupine import PorcupineActivationAdapter
 from .llm import FakeLLMAdapter, FoundationModelsBridgeAdapter, MLXLMAdapter
 from .llm.anthropic import AnthropicAdapter
 from .llm.openai import OpenAIAdapter
 from .stt import SpeechAnalyzerSTTAdapter
 from .tts import AVSpeechAdapter, MLXAudioKokoroAdapter, NoOpTTSAdapter
+from .tts.mlx_audio_qwen3 import MLXAudioQwen3Adapter
 from .vad import SpeechDetectorAdapter
 
 
@@ -36,11 +38,14 @@ class RuntimeAdapters:
 def build_runtime_adapters(
     config: JarvisConfig, enable_native_backends: bool = False
 ) -> RuntimeAdapters:
-    activation = PushToTalkActivationAdapter(
-        backend=config.activation_backend,
-        hotkey=config.activation_hotkey,
-        terminal_fallback=config.activation_terminal_fallback,
-    )
+    if config.activation_backend == "porcupine":
+        activation = PorcupineActivationAdapter(keyword=config.activation_keyword)
+    else:
+        activation = PushToTalkActivationAdapter(
+            backend=config.activation_backend,
+            hotkey=config.activation_hotkey,
+            terminal_fallback=config.activation_terminal_fallback,
+        )
     activation_backend_name = config.activation_backend
     stt = SpeechAnalyzerSTTAdapter(config.stt_bridge_bin, locale=config.stt_locale)
     stt_backend_name = config.stt_backend
@@ -107,6 +112,12 @@ def build_runtime_adapters(
             lang_code=config.tts_lang_code,
         )
         tts_backend_name = "mlx_audio_kokoro"
+    elif enable_native_backends and config.tts_backend == "mlx_audio_qwen3":
+        tts = MLXAudioQwen3Adapter(
+            model_repo=config.tts_model,
+            speaker_id=config.tts_voice,
+        )
+        tts_backend_name = "mlx_audio_qwen3"
     elif enable_native_backends and config.tts_backend == "avspeech":
         tts = AVSpeechAdapter(
             voice=config.tts_avspeech_voice,
