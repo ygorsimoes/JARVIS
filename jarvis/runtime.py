@@ -160,6 +160,7 @@ class JarvisRuntime:
         turn_manager_config = TurnManagerConfig(
             silence_timeout_ms=config.turn_silence_timeout_ms,
             partial_commit_min_chars=config.turn_partial_commit_min_chars,
+            partial_stability_ms=config.turn_partial_stability_ms,
             tick_interval_ms=config.turn_tick_interval_ms,
             max_turn_duration_s=config.turn_max_duration_s,
         )
@@ -292,7 +293,13 @@ class JarvisRuntime:
             await self.state_machine.transition(
                 JarvisState.TRANSCRIBING,
                 completed_turn.reason,
-                {"used_partial": completed_turn.used_partial},
+                {
+                    "used_partial": completed_turn.used_partial,
+                    "turn_duration_ms": completed_turn.metadata.get("turn_duration_ms"),
+                    "silence_duration_ms": completed_turn.metadata.get(
+                        "silence_duration_ms"
+                    ),
+                },
             )
             return CapturedVoiceTurn(
                 turn_id=turn_id,
@@ -401,6 +408,7 @@ class JarvisRuntime:
             await self._pending_voice_pipeline.shutdown()
             self._pending_voice_pipeline = None
         for adapter in (
+            self.activation_adapter,
             self.hot_path_adapter,
             self.deliberative_adapter,
             self.stt_adapter,
@@ -584,7 +592,9 @@ class JarvisRuntime:
         self, event: dict, turn_id: Optional[str] = None
     ) -> None:
         event_type = event.get("type")
-        if event_type == "speech_started":
+        if event_type == "ready":
+            mapped = EventType.STT_READY
+        elif event_type == "speech_started":
             mapped = EventType.SPEECH_STARTED
         elif event_type == "speech_ended":
             mapped = EventType.SPEECH_ENDED
@@ -592,6 +602,8 @@ class JarvisRuntime:
             mapped = EventType.PARTIAL_TRANSCRIPT
         elif event_type == "final_transcript":
             mapped = EventType.FINAL_TRANSCRIPT
+        elif event_type == "speech_detector_result":
+            mapped = EventType.VAD_ACTIVITY
         else:
             return
 
@@ -606,12 +618,13 @@ class JarvisRuntime:
     def _consume_turn_signal(
         self, turn_manager: TurnManager, event: dict
     ) -> Optional[CompletedTurn]:
-        event_type = event.get("type")
-        if event_type == "speech_detector_result":
-            speech_detected = bool(event.get("speech_detected"))
+        classified_event = self.vad_adapter.classify_event(event)
+        if classified_event is not None:
             return turn_manager.consume_vad_signal(
-                speech_detected, reason="speech_detector"
+                bool(classified_event["speech_detected"]),
+                reason=self.vad_adapter.signal_reason(event) or "vad_adapter",
             )
+        event_type = event.get("type")
         if event_type == "speech_started":
             return turn_manager.consume_vad_signal(True, reason="speech_started")
         if event_type == "speech_ended":
@@ -620,12 +633,6 @@ class JarvisRuntime:
             return turn_manager.consume_partial_transcript(event.get("text", ""))
         if event_type == "final_transcript":
             return turn_manager.consume_final_transcript(event.get("text", ""))
-        event_has_speech = getattr(self.vad_adapter, "event_has_speech", None)
-        if event_has_speech is not None and event_has_speech(event):
-            return turn_manager.consume_vad_signal(True, reason="vad_adapter")
-        event_is_silence = getattr(self.vad_adapter, "event_is_silence", None)
-        if event_is_silence is not None and event_is_silence(event):
-            return turn_manager.consume_vad_signal(False, reason="vad_adapter")
         return turn_manager.consume_event(event)
 
     async def _handle_turn_failure(
@@ -788,7 +795,7 @@ class JarvisRuntime:
     async def _publish_event(
         self,
         event_type: EventType,
-        payload: Optional[dict] = None,
+        payload: Optional[dict[str, object]] = None,
         *,
         turn_id: Optional[str] = None,
         route: Optional[RouteDecision] = None,
@@ -810,13 +817,13 @@ class JarvisRuntime:
 
     def _build_event_payload(
         self,
-        payload: Optional[dict] = None,
+        payload: Optional[dict[str, object]] = None,
         *,
         turn_id: Optional[str] = None,
         route: Optional[RouteDecision] = None,
         backend: Optional[str] = None,
         mode: Optional[str] = None,
-    ) -> dict:
+    ) -> dict[str, object]:
         active_turn = self._active_turn
         resolved_route = route or (
             active_turn.route if active_turn is not None else None
@@ -837,7 +844,7 @@ class JarvisRuntime:
             else (active_turn.mode if active_turn is not None else None)
         )
 
-        enriched = {"session_id": self.session_id}
+        enriched: dict[str, object] = {"session_id": self.session_id}
         if resolved_turn_id is not None:
             enriched["turn_id"] = resolved_turn_id
         if resolved_mode is not None:

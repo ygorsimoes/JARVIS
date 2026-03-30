@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Deque, Dict, Optional
@@ -14,16 +15,25 @@ class SpeechAnalyzerStreamError(RuntimeError):
 @dataclass
 class SpeechAnalyzerSession:
     process: asyncio.subprocess.Process
+    locale: str
+    backend_name: str = "speech_analyzer"
     stderr_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=20))
     stderr_task: Optional[asyncio.Task] = None
 
     async def iter_events(self) -> AsyncIterator[Dict[str, Any]]:
+        sequence = 0
         assert self.process.stdout is not None
         async for raw_line in self.process.stdout:
             line = raw_line.decode("utf-8").strip()
             if not line:
                 continue
-            yield json.loads(line)
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise SpeechAnalyzerStreamError(
+                    "SpeechAnalyzer CLI emitted an invalid event payload"
+                )
+            yield self._normalize_event(event, sequence=sequence)
+            sequence += 1
 
         return_code = await self.process.wait()
         if return_code not in {0, None}:
@@ -50,6 +60,16 @@ class SpeechAnalyzerSession:
             return "SpeechAnalyzer CLI failed without stderr output"
         return " ".join(self.stderr_lines)
 
+    def _normalize_event(self, event: Dict[str, Any], sequence: int) -> Dict[str, Any]:
+        normalized = dict(event)
+        normalized.setdefault("locale", self.locale)
+        normalized.setdefault("stt_backend", self.backend_name)
+        normalized["sequence"] = sequence
+        normalized["received_at_monotonic"] = time.monotonic()
+        if normalized.get("type") == "speech_detector_result":
+            normalized["speech_detected"] = bool(normalized.get("speech_detected"))
+        return normalized
+
 
 class SpeechAnalyzerSTTAdapter:
     def __init__(self, binary_path: str, locale: str = "pt-BR") -> None:
@@ -67,7 +87,7 @@ class SpeechAnalyzerSTTAdapter:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        session = SpeechAnalyzerSession(process=process)
+        session = SpeechAnalyzerSession(process=process, locale=self.locale)
         session.stderr_task = asyncio.create_task(self._drain_stderr(session))
         return session
 

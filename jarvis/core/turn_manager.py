@@ -9,12 +9,17 @@ from typing import Optional
 class TurnManagerConfig:
     silence_timeout_ms: int = 800
     partial_commit_min_chars: int = 16
+    partial_stability_ms: int = 250
     tick_interval_ms: int = 100
     max_turn_duration_s: float = 30.0
 
     @property
     def silence_timeout_s(self) -> float:
         return self.silence_timeout_ms / 1000.0
+
+    @property
+    def partial_stability_s(self) -> float:
+        return self.partial_stability_ms / 1000.0
 
 
 @dataclass
@@ -53,8 +58,11 @@ class TurnManager:
         self.started_at_monotonic: Optional[float] = None
         self.silence_started_at_monotonic: Optional[float] = None
         self.last_event_at_monotonic: Optional[float] = None
+        self.last_partial_at_monotonic: Optional[float] = None
 
-    def consume_event(self, event: dict, now: Optional[float] = None) -> Optional[CompletedTurn]:
+    def consume_event(
+        self, event: dict, now: Optional[float] = None
+    ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         self.last_event_at_monotonic = now
         event_type = event.get("type")
@@ -97,22 +105,29 @@ class TurnManager:
             return self._complete("%s_with_final" % reason, now, used_partial=False)
         return None
 
-    def consume_partial_transcript(self, text: object, now: Optional[float] = None) -> Optional[CompletedTurn]:
+    def consume_partial_transcript(
+        self, text: object, now: Optional[float] = None
+    ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         self.last_event_at_monotonic = now
         normalized = self._normalized_text(text)
         if normalized:
             self.partial_text = normalized
+            self.last_partial_at_monotonic = now
         return self._maybe_complete_for_max_duration(now)
 
-    def consume_final_transcript(self, text: object, now: Optional[float] = None) -> Optional[CompletedTurn]:
+    def consume_final_transcript(
+        self, text: object, now: Optional[float] = None
+    ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         self.last_event_at_monotonic = now
         normalized = self._normalized_text(text)
         if normalized:
             self.final_text = normalized
         if not self.speech_active and self.final_text:
-            return self._complete("final_transcript_after_silence", now, used_partial=False)
+            return self._complete(
+                "final_transcript_after_silence", now, used_partial=False
+            )
         return self._maybe_complete_for_max_duration(now)
 
     def tick(self, now: Optional[float] = None) -> Optional[CompletedTurn]:
@@ -132,16 +147,18 @@ class TurnManager:
         if self.final_text:
             return self._complete("trailing_silence_final", now, used_partial=False)
 
-        if self._partial_is_committable():
+        if self._partial_is_committable(now):
             return self._complete("trailing_silence_partial", now, used_partial=True)
 
         return None
 
-    def finalize(self, reason: str = "stream_ended", now: Optional[float] = None) -> Optional[CompletedTurn]:
+    def finalize(
+        self, reason: str = "stream_ended", now: Optional[float] = None
+    ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         if self.final_text:
             return self._complete(reason, now, used_partial=False)
-        if self._partial_is_committable():
+        if self._partial_is_committable(now, require_stability=False):
             return self._complete(reason, now, used_partial=True)
         return None
 
@@ -165,19 +182,30 @@ class TurnManager:
             return None
         if self.final_text:
             return self._complete("max_turn_duration_final", now, used_partial=False)
-        if self._partial_is_committable():
+        if self._partial_is_committable(now):
             return self._complete("max_turn_duration_partial", now, used_partial=True)
         return None
 
-    def _partial_is_committable(self) -> bool:
+    def _partial_is_committable(
+        self, now: Optional[float] = None, require_stability: bool = True
+    ) -> bool:
         stripped = self.partial_text.strip()
         if len(stripped) < self.config.partial_commit_min_chars:
+            return False
+        if require_stability and not self._partial_is_stable(now):
             return False
         if self._looks_incomplete(stripped):
             return False
         if stripped.endswith((".", "!", "?")):
             return True
         return len(stripped.split()) >= 5
+
+    def _partial_is_stable(self, now: Optional[float]) -> bool:
+        if self.last_partial_at_monotonic is None:
+            return False
+        if now is None:
+            now = time.monotonic()
+        return now - self.last_partial_at_monotonic >= self.config.partial_stability_s
 
     def _looks_incomplete(self, text: str) -> bool:
         lowered = text.rstrip().lower()
@@ -196,10 +224,17 @@ class TurnManager:
                 "speech_active": self.speech_active,
                 "had_final": bool(self.final_text),
                 "had_partial": bool(self.partial_text),
+                "silence_duration_ms": self._silence_duration_ms(now),
+                "turn_duration_ms": int((now - started_at) * 1000),
             },
         )
         self.reset()
         return completed
+
+    def _silence_duration_ms(self, now: float) -> int:
+        if self.silence_started_at_monotonic is None:
+            return 0
+        return int(max(0.0, now - self.silence_started_at_monotonic) * 1000)
 
     @staticmethod
     def _normalized_text(value: object) -> str:

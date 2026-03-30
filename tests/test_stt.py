@@ -4,7 +4,10 @@ import tempfile
 import textwrap
 import unittest
 
-from jarvis.adapters.stt.speech_analyzer import SpeechAnalyzerSTTAdapter, SpeechAnalyzerStreamError
+from jarvis.adapters.stt.speech_analyzer import (
+    SpeechAnalyzerSTTAdapter,
+    SpeechAnalyzerStreamError,
+)
 
 
 class SpeechAnalyzerAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -15,8 +18,10 @@ class SpeechAnalyzerAdapterTests(unittest.IsolatedAsyncioTestCase):
             import sys
 
             events = [
+                {"type": "ready", "locale": "pt-BR", "sample_rate": 16000},
                 {"type": "speech_started"},
                 {"type": "partial_transcript", "text": "que horas sao"},
+                {"type": "speech_detector_result", "speech_detected": 1},
                 {"type": "speech_ended"},
                 {"type": "final_transcript", "text": "Que horas sao agora?"},
             ]
@@ -31,8 +36,15 @@ class SpeechAnalyzerAdapterTests(unittest.IsolatedAsyncioTestCase):
         async for event in adapter.iter_events():
             events.append(event)
 
+        self.assertEqual(events[0]["type"], "ready")
+        self.assertEqual(events[0]["locale"], "pt-BR")
+        self.assertEqual(events[0]["stt_backend"], "speech_analyzer")
+        self.assertEqual(events[0]["sequence"], 0)
+        self.assertIn("received_at_monotonic", events[0])
+        self.assertTrue(events[3]["speech_detected"])
         self.assertEqual(events[-1]["type"], "final_transcript")
         self.assertEqual(events[-1]["text"], "Que horas sao agora?")
+        self.assertEqual(events[-1]["sequence"], 5)
 
     async def test_iter_events_surfaces_stderr_on_failure(self):
         script = self._make_script(

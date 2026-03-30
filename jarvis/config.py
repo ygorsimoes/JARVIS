@@ -8,7 +8,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .prompts import BASE_SYSTEM_PROMPT
 
 
-DEFAULT_SYSTEM_ALLOWED_APPS = ["Safari", "Spotify", "Notes", "Calendar", "Music", "Mail", "Terminal"]
+DEFAULT_SYSTEM_ALLOWED_APPS = [
+    "Safari",
+    "Spotify",
+    "Notes",
+    "Calendar",
+    "Music",
+    "Mail",
+    "Terminal",
+]
 
 
 class JarvisConfig(BaseSettings):
@@ -31,7 +39,9 @@ class JarvisConfig(BaseSettings):
 
     llm_hot_path: str = "foundation_models"
     llm_hot_path_url: str = "http://127.0.0.1:8008"
-    llm_hot_path_bridge_bin: str = "./swift/FoundationModelsBridge/.build/release/foundation-models-bridge"
+    llm_hot_path_bridge_bin: str = (
+        "./swift/FoundationModelsBridge/.build/release/foundation-models-bridge"
+    )
     llm_deliberative: str = "mlx_lm"
     llm_deliberative_model: str = "mlx-community/Qwen3-8B-4bit"
     llm_response_max_tokens: int = 512
@@ -47,8 +57,12 @@ class JarvisConfig(BaseSettings):
         default="push_to_talk",
         validation_alias=AliasChoices("ACTIVATION_BACKEND", "WAKE_WORD_BACKEND"),
     )
+    activation_hotkey: str = "<ctrl>+<alt>+space"
+    activation_terminal_fallback: bool = True
     allowed_file_roots: List[str] = Field(default_factory=list)
-    system_allowed_apps: List[str] = Field(default_factory=lambda: list(DEFAULT_SYSTEM_ALLOWED_APPS))
+    system_allowed_apps: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_SYSTEM_ALLOWED_APPS)
+    )
     working_memory_turns: int = 12
     event_bus_queue_size: int = 128
 
@@ -59,6 +73,7 @@ class JarvisConfig(BaseSettings):
 
     turn_silence_timeout_ms: int = 800
     turn_partial_commit_min_chars: int = 16
+    turn_partial_stability_ms: int = 250
     turn_tick_interval_ms: int = 100
     turn_max_duration_s: float = 30.0
 

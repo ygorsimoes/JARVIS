@@ -62,12 +62,42 @@ class PlaybackBackendTests(unittest.IsolatedAsyncioTestCase):
 
 class RuntimeSupportTests(unittest.IsolatedAsyncioTestCase):
     async def test_push_to_talk_waits_for_input(self):
-        adapter = PushToTalkActivationAdapter(prompt="Pressione")
+        adapter = PushToTalkActivationAdapter(
+            prompt="Pressione", backend="push_to_talk_terminal"
+        )
         with patch("builtins.input", return_value="") as fake_input:
             activated = await adapter.listen()
 
         fake_input.assert_called_once_with("Pressione")
         self.assertTrue(activated)
+
+    async def test_push_to_talk_uses_hotkey_when_available(self):
+        adapter = PushToTalkActivationAdapter()
+
+        def fake_ensure_listener():
+            adapter._activation_queue = asyncio.Queue(maxsize=1)
+            adapter._activation_queue.put_nowait(True)
+
+        with patch.object(
+            adapter, "_ensure_hotkey_listener", side_effect=fake_ensure_listener
+        ):
+            with patch("builtins.input") as fake_input:
+                activated = await adapter.listen()
+
+        fake_input.assert_not_called()
+        self.assertTrue(activated)
+
+    async def test_push_to_talk_shutdown_stops_hotkey_listener(self):
+        adapter = PushToTalkActivationAdapter()
+        stop_calls = []
+        adapter.__dict__["_listener"] = types.SimpleNamespace(
+            stop=lambda: stop_calls.append("stop")
+        )
+
+        await adapter.shutdown()
+
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertIsNone(adapter._listener)
 
     async def test_speech_detector_classifies_speech_and_silence(self):
         self.assertTrue(
@@ -85,6 +115,12 @@ class RuntimeSupportTests(unittest.IsolatedAsyncioTestCase):
             SpeechDetectorAdapter.event_is_silence(
                 {"type": "speech_detector_result", "speech_detected": False}
             )
+        )
+        self.assertEqual(
+            SpeechDetectorAdapter.signal_reason(
+                {"type": "speech_detector_result", "speech_detected": True}
+            ),
+            "speech_detector_result",
         )
 
     async def test_resource_governor_returns_unavailable_without_mlx(self):

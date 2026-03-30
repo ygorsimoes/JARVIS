@@ -32,7 +32,11 @@ class RuntimeAdapters:
 def build_runtime_adapters(
     config: JarvisConfig, enable_native_backends: bool = False
 ) -> RuntimeAdapters:
-    activation = PushToTalkActivationAdapter()
+    activation = PushToTalkActivationAdapter(
+        backend=config.activation_backend,
+        hotkey=config.activation_hotkey,
+        terminal_fallback=config.activation_terminal_fallback,
+    )
     activation_backend_name = config.activation_backend
     stt = SpeechAnalyzerSTTAdapter(config.stt_bridge_bin, locale=config.stt_locale)
     stt_backend_name = config.stt_backend

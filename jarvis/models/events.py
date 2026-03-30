@@ -14,6 +14,8 @@ class EventType(str, Enum):
     ACTIVATION_TRIGGERED = "activation_triggered"
     STATE_CHANGED = "state_changed"
     INTERRUPTION_REQUESTED = "interruption_requested"
+    STT_READY = "stt_ready"
+    VAD_ACTIVITY = "vad_activity"
     SPEECH_STARTED = "speech_started"
     SPEECH_ENDED = "speech_ended"
     PARTIAL_TRANSCRIPT = "partial_transcript"
