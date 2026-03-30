@@ -8,7 +8,7 @@ from jarvis.adapters.llm import (
     MLXLMAdapter,
 )
 from jarvis.adapters.stt import SpeechAnalyzerSTTAdapter
-from jarvis.adapters.tts import MLXAudioKokoroAdapter, NoOpTTSAdapter
+from jarvis.adapters.tts import AVSpeechAdapter, MLXAudioKokoroAdapter, NoOpTTSAdapter
 from jarvis.adapters.vad import SpeechDetectorAdapter
 from jarvis.audio import NoOpPlaybackBackend, SoundDevicePlaybackBackend
 from jarvis.config import JarvisConfig
@@ -40,6 +40,14 @@ class RuntimeAdaptersFactoryTests(unittest.TestCase):
         self.assertIsInstance(adapters.deliberative_llm, MLXLMAdapter)
         self.assertIsInstance(adapters.tts, MLXAudioKokoroAdapter)
         self.assertIsInstance(adapters.playback, SoundDevicePlaybackBackend)
+
+    def test_native_flag_can_build_avspeech_fallback(self):
+        config = JarvisConfig(tts_backend="avspeech")
+
+        adapters = build_runtime_adapters(config, enable_native_backends=True)
+
+        self.assertIsInstance(adapters.tts, AVSpeechAdapter)
+        self.assertEqual(adapters.tts_backend_name, "avspeech")
 
 
 if __name__ == "__main__":

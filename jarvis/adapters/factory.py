@@ -7,7 +7,7 @@ from ..config import JarvisConfig
 from .activation import PushToTalkActivationAdapter
 from .llm import FakeLLMAdapter, FoundationModelsBridgeAdapter, MLXLMAdapter
 from .stt import SpeechAnalyzerSTTAdapter
-from .tts import MLXAudioKokoroAdapter, NoOpTTSAdapter
+from .tts import AVSpeechAdapter, MLXAudioKokoroAdapter, NoOpTTSAdapter
 from .vad import SpeechDetectorAdapter
 
 
@@ -83,6 +83,13 @@ def build_runtime_adapters(
             lang_code=config.tts_lang_code,
         )
         tts_backend_name = "mlx_audio_kokoro"
+    elif enable_native_backends and config.tts_backend == "avspeech":
+        tts = AVSpeechAdapter(
+            voice=config.tts_avspeech_voice,
+            sample_rate_hz=config.tts_sample_rate_hz,
+            rate=config.tts_avspeech_rate,
+        )
+        tts_backend_name = "avspeech"
     elif config.tts_backend == "noop":
         tts = NoOpTTSAdapter()
         tts_backend_name = "noop"

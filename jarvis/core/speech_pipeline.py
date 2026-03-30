@@ -44,26 +44,34 @@ class SpeechPipeline:
         self._playback_task: Optional[asyncio.Task] = None
         self._started = False
         self._stopped = False
+        self._shutdown = False
         self._error: Optional[Exception] = None
 
     async def start(self) -> None:
-        if self._started:
+        if self._started or self._shutdown:
             return
         self._started = True
-        self._tts_task = asyncio.create_task(self._tts_worker(), name="jarvis-tts-worker")
+        self._tts_task = asyncio.create_task(
+            self._tts_worker(), name="jarvis-tts-worker"
+        )
         self._playback_task = asyncio.create_task(
             self._playback_worker(), name="jarvis-playback-worker"
         )
 
     async def enqueue_sentence(self, index: int, text: str) -> None:
-        if self._stopped:
+        if self._stopped or self._shutdown:
             return
         if not self._started:
             await self.start()
         await self._sentence_queue.put(QueuedSentence(index=index, text=text))
-        await self._publish(EventType.TTS_SENTENCE_QUEUED, {"utterance_id": self.utterance_id, "index": index, "text": text})
+        await self._publish(
+            EventType.TTS_SENTENCE_QUEUED,
+            {"utterance_id": self.utterance_id, "index": index, "text": text},
+        )
 
     async def finish(self) -> None:
+        if self._shutdown:
+            return
         if not self._started:
             await self.start()
         await self._sentence_queue.put(None)
@@ -75,14 +83,29 @@ class SpeechPipeline:
         if self._stopped:
             return
         self._stopped = True
+
+        cancel_synthesis = getattr(self.tts_adapter, "cancel_current_synthesis", None)
+        if cancel_synthesis is not None:
+            try:
+                await cancel_synthesis()
+            except Exception:
+                pass
+
+        self._drain_queue(self._sentence_queue)
+        self._drain_queue(self._audio_queue)
+
         if self._tts_task is not None:
             self._tts_task.cancel()
         if self._playback_task is not None:
             self._playback_task.cancel()
+
         await self.playback_backend.stop()
         await self._await_workers()
 
     async def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         await self.stop()
         await self.playback_backend.shutdown()
 
@@ -90,18 +113,26 @@ class SpeechPipeline:
         try:
             while True:
                 item = await self._sentence_queue.get()
-                if item is None:
+                if item is None or self._stopped:
                     break
                 await self._publish(
                     EventType.TTS_STARTED,
-                    {"utterance_id": self.utterance_id, "index": item.index, "text": item.text},
+                    {
+                        "utterance_id": self.utterance_id,
+                        "index": item.index,
+                        "text": item.text,
+                    },
                 )
                 total_size = 0
                 emitted_any_chunk = False
                 async for rendered in self._render_sentence_chunks(item):
+                    if self._stopped:
+                        break
                     emitted_any_chunk = True
                     total_size += len(rendered.audio_bytes)
                     await self._audio_queue.put(rendered)
+                if self._stopped:
+                    break
                 if not emitted_any_chunk:
                     await self._audio_queue.put(
                         RenderedAudioChunk(
@@ -114,7 +145,11 @@ class SpeechPipeline:
                     )
                 await self._publish(
                     EventType.TTS_COMPLETED,
-                    {"utterance_id": self.utterance_id, "index": item.index, "size_bytes": total_size},
+                    {
+                        "utterance_id": self.utterance_id,
+                        "index": item.index,
+                        "size_bytes": total_size,
+                    },
                 )
         except asyncio.CancelledError:
             raise
@@ -128,7 +163,7 @@ class SpeechPipeline:
         try:
             while True:
                 item = await self._audio_queue.get()
-                if item is None:
+                if item is None or self._stopped:
                     break
                 if isinstance(item, Exception):
                     self._error = item
@@ -138,9 +173,11 @@ class SpeechPipeline:
                         EventType.PLAYBACK_STARTED,
                         {"utterance_id": self.utterance_id, "index": item.index},
                     )
-                if item.audio_bytes:
-                    await self.playback_backend.play(item.audio_bytes, self.sample_rate_hz)
-                if item.is_last_chunk:
+                if item.audio_bytes and not self._stopped:
+                    await self.playback_backend.play(
+                        item.audio_bytes, self.sample_rate_hz
+                    )
+                if item.is_last_chunk and not self._stopped:
                     await self._publish(
                         EventType.PLAYBACK_COMPLETED,
                         {"utterance_id": self.utterance_id, "index": item.index},
@@ -155,6 +192,8 @@ class SpeechPipeline:
         chunk_index = 0
 
         async for audio_chunk in self.tts_adapter.synthesize_stream(item.text):
+            if self._stopped:
+                break
             if pending_chunk is not None:
                 yield RenderedAudioChunk(
                     index=item.index,
@@ -166,7 +205,7 @@ class SpeechPipeline:
                 chunk_index += 1
             pending_chunk = audio_chunk
 
-        if pending_chunk is None:
+        if pending_chunk is None or self._stopped:
             return
 
         yield RenderedAudioChunk(
@@ -178,13 +217,26 @@ class SpeechPipeline:
         )
 
     async def _await_workers(self) -> None:
-        tasks = [task for task in (self._tts_task, self._playback_task) if task is not None]
+        tasks = [
+            task for task in (self._tts_task, self._playback_task) if task is not None
+        ]
         if not tasks:
             return
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        self._tts_task = None
+        self._playback_task = None
         for result in results:
-            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
                 self._error = self._error or result
+
+    def _drain_queue(self, queue: asyncio.Queue) -> None:
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     async def _publish(self, event_type: EventType, payload: dict) -> None:
         if self.event_bus is None:

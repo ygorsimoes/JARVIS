@@ -23,10 +23,21 @@ class SlowFakeTTSAdapter(FakeTTSAdapter):
         yield text.encode("utf-8") + self.suffix
 
 
+class CancellableSlowFakeTTSAdapter(SlowFakeTTSAdapter):
+    def __init__(self, suffix: bytes = b"-audio"):
+        super().__init__(suffix=suffix)
+        self.cancel_calls = 0
+
+    async def cancel_current_synthesis(self) -> bool:
+        self.cancel_calls += 1
+        return True
+
+
 class FakePlaybackBackend:
     def __init__(self):
         self.played = []
         self.stop_calls = 0
+        self.shutdown_calls = 0
 
     async def play(self, audio_bytes: bytes, sample_rate_hz: int) -> None:
         self.played.append((audio_bytes, sample_rate_hz))
@@ -35,7 +46,7 @@ class FakePlaybackBackend:
         self.stop_calls += 1
 
     async def shutdown(self) -> None:
-        return None
+        self.shutdown_calls += 1
 
 
 class SpeechPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -63,7 +74,7 @@ class SpeechPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(EventType.PLAYBACK_COMPLETED, event_types)
 
     async def test_pipeline_stop_cancels_pending_work(self):
-        tts = SlowFakeTTSAdapter()
+        tts = CancellableSlowFakeTTSAdapter()
         playback = FakePlaybackBackend()
         pipeline = SpeechPipeline(tts, playback, sample_rate_hz=24000)
 
@@ -74,6 +85,18 @@ class SpeechPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(playback.stop_calls, 1)
         self.assertEqual(playback.played, [])
+        self.assertEqual(tts.cancel_calls, 1)
+
+    async def test_pipeline_shutdown_is_idempotent_and_shuts_down_playback(self):
+        tts = FakeTTSAdapter()
+        playback = FakePlaybackBackend()
+        pipeline = SpeechPipeline(tts, playback, sample_rate_hz=24000)
+
+        await pipeline.start()
+        await pipeline.shutdown()
+        await pipeline.shutdown()
+
+        self.assertEqual(playback.shutdown_calls, 1)
 
 
 if __name__ == "__main__":

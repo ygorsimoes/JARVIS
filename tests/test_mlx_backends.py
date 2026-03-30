@@ -1,10 +1,13 @@
 import asyncio
+import array
+from pathlib import Path
 import time
 import types
 import unittest
 from unittest.mock import patch
 
 from jarvis.adapters.llm.mlx_lm import MLXLMAdapter
+from jarvis.adapters.tts.avspeech import AVSpeechAdapter
 from jarvis.adapters.tts.mlx_audio_kokoro import MLXAudioKokoroAdapter
 from jarvis.models.conversation import Message, Role
 
@@ -170,6 +173,64 @@ class MLXAudioKokoroAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(chunks, [b"audio-bytes"])
         self.assertEqual(fake_model.last_request, ("ola mundo", "pm_santa", "p"))
+
+
+class AVSpeechAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_synthesize_stream_yields_rendered_audio_bytes(self):
+        adapter = AVSpeechAdapter(voice="Luciana", sample_rate_hz=24000)
+
+        with patch.object(adapter, "_render_wav_bytes", return_value=b"pcm-bytes"):
+            chunks = []
+            async for chunk in adapter.synthesize_stream("ola mundo"):
+                chunks.append(chunk)
+
+        self.assertEqual(chunks, [b"pcm-bytes"])
+
+    async def test_cancel_current_synthesis_terminates_active_process(self):
+        adapter = AVSpeechAdapter()
+        events = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+
+            def terminate(self):
+                events.append("terminate")
+                self.returncode = 0
+
+            def kill(self):
+                events.append("kill")
+                self.returncode = -9
+
+            async def wait(self):
+                events.append("wait")
+                return self.returncode
+
+        adapter.__dict__["_active_process"] = FakeProcess()
+        cancelled = await adapter.cancel_current_synthesis()
+
+        self.assertTrue(cancelled)
+        self.assertEqual(events, ["terminate", "wait"])
+        self.assertIsNone(adapter._active_process)
+
+    def test_read_wav_as_float32_converts_pcm16_to_float_bytes(self):
+        adapter = AVSpeechAdapter(sample_rate_hz=24000)
+        samples = array.array("h", [0, 16384, -16384])
+
+        with patch("wave.open") as wave_open:
+            handle = wave_open.return_value.__enter__.return_value
+            handle.readframes.return_value = samples.tobytes()
+            handle.getnframes.return_value = 3
+            handle.getsampwidth.return_value = 2
+            handle.getnchannels.return_value = 1
+
+            audio_bytes = adapter._read_wav_as_float32(Path("dummy.wav"))
+
+        floats = array.array("f")
+        floats.frombytes(audio_bytes)
+        self.assertEqual(len(floats), 3)
+        self.assertAlmostEqual(floats[1], 0.5, places=3)
+        self.assertAlmostEqual(floats[2], -0.5, places=3)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,8 @@ class JarvisConfig(BaseSettings):
     tts_model: str = "mlx-community/Kokoro-82M-bf16"
     tts_voice: str = "pm_santa"
     tts_lang_code: str = "p"
+    tts_avspeech_voice: Optional[str] = "Luciana"
+    tts_avspeech_rate: int = 175
     tts_sample_rate_hz: int = 24000
     playback_backend: str = "sounddevice"
 
