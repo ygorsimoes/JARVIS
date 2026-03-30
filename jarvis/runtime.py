@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import logging
 import uuid
+from pathlib import Path
 from typing import AsyncIterator, Iterable, List, Optional
 
 from .adapters import build_runtime_adapters
+from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
 from .bus import EventBus
 from .config import JarvisConfig
 from .core.action_broker import ActionBroker, ActionRequest
@@ -30,6 +33,8 @@ from .models.memory import Memory
 from .models.state import JarvisState
 from .tools import ToolRegistry, build_default_registry
 from .tools.timer import parse_duration_seconds
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,6 +100,7 @@ class JarvisRuntime:
         tts_adapter,
         vad_adapter,
         playback_backend,
+        memory_adapter: Optional[SQLiteVecMemoryAdapter] = None,
     ) -> None:
         self.config = config
         self.session_id = str(uuid.uuid4())
@@ -121,6 +127,7 @@ class JarvisRuntime:
         self.tts_adapter = tts_adapter
         self.vad_adapter = vad_adapter
         self.playback_backend = playback_backend
+        self.memory_adapter: Optional[SQLiteVecMemoryAdapter] = memory_adapter
         self._active_turn: ActiveTurnExecution | None = None
         self._pending_voice_pipeline: SpeechPipeline | None = None
 
@@ -164,6 +171,10 @@ class JarvisRuntime:
             tick_interval_ms=config.turn_tick_interval_ms,
             max_turn_duration_s=config.turn_max_duration_s,
         )
+        # Memory adapter — stored in ~/.jarvis/memory.db by default.
+        memory_db_path = Path.home() / ".jarvis" / "memory.db"
+        memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_adapter = SQLiteVecMemoryAdapter(db_path=memory_db_path)
 
         return cls(
             config=config,
@@ -190,6 +201,7 @@ class JarvisRuntime:
             tts_adapter=adapters.tts,
             vad_adapter=adapters.vad,
             playback_backend=adapters.playback,
+            memory_adapter=memory_adapter,
         )
 
     async def run_voice_foreground(self, turn_limit: Optional[int] = None) -> None:
@@ -418,6 +430,8 @@ class JarvisRuntime:
             shutdown = getattr(adapter, "shutdown", None)
             if shutdown is not None:
                 await shutdown()
+        if self.memory_adapter is not None:
+            await self.memory_adapter.close()
 
     async def interrupt_current_turn(self, reason: str = "barge-in") -> bool:
         execution = self._active_turn
@@ -479,7 +493,15 @@ class JarvisRuntime:
         text: str,
         recalled_memories: Optional[Iterable[Memory]] = None,
     ) -> AsyncIterator[JarvisTurnChunk]:
+        # --- Memory recall (FTS5, target < 5ms) ----------------------
+        if recalled_memories is None and self.memory_adapter is not None:
+            try:
+                recalled_memories = await self.memory_adapter.search(text, top_k=5)
+            except Exception as exc:
+                logger.warning("Memory recall failed: %s", exc)
+                recalled_memories = []
         recalled_memories = list(recalled_memories or [])
+        # -------------------------------------------------------------
         route = self.router.route(
             text,
             recalled_memories=len(recalled_memories),
@@ -587,6 +609,12 @@ class JarvisRuntime:
             backend=backend_name,
         )
         await self.state_machine.transition(JarvisState.IDLE, "turn completed")
+        # --- Memory persistence (fire-and-forget, never blocks) -------
+        if self.memory_adapter is not None and text and full_text:
+            asyncio.create_task(
+                self.memory_adapter.maybe_persist_turn(text, full_text),
+                name="jarvis-memory-persist",
+            )
 
     async def _publish_stt_event(
         self, event: dict, turn_id: Optional[str] = None
