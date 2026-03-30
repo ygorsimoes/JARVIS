@@ -12,4 +12,4 @@ COMPORTAMENTO
 - Se faltar contexto critico, faca uma pergunta objetiva.
 """
 
-MEMORY_PREAMBLE = "Memorias recuperadas para este turno:"
+MEMORY_PREAMBLE = "Memorias relevantes para este turno (use apenas se ajudarem agora):"

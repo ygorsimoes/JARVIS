@@ -1,10 +1,12 @@
 import asyncio
 import unittest
+from typing import Any, cast
 from unittest.mock import patch
 
 from jarvis.config import JarvisConfig
 from jarvis.models.conversation import Role, RouteTarget
 from jarvis.models.events import EventType
+from jarvis.models.memory import Memory, MemoryCategory, MemorySource
 from jarvis.models.state import JarvisState
 from jarvis.runtime import JarvisRuntime
 
@@ -98,6 +100,23 @@ class CapturingHotPathAdapter:
 
     async def cancel_current_response(self) -> bool:
         return False
+
+
+class FakeMemorySystem:
+    def __init__(self, memories=None):
+        self.memories = list(memories or [])
+        self.calls = []
+        self.persisted = []
+
+    async def recall(
+        self, query: str, route_target: RouteTarget, top_k: int | None = None
+    ):
+        self.calls.append((query, route_target, top_k))
+        return list(self.memories)
+
+    async def maybe_persist_turn(self, user_text: str, assistant_text: str):
+        self.persisted.append((user_text, assistant_text))
+        return None
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -239,6 +258,89 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("files.read", tool_names)
         self.assertNotIn("shell.execute", tool_names)
         self.assertNotIn("files.move", tool_names)
+
+    async def test_runtime_uses_hot_path_memory_policy_after_routing(self):
+        self.runtime.hot_path_adapter = CapturingHotPathAdapter()
+        self.runtime.memory_system = cast(
+            Any,
+            FakeMemorySystem(
+                [
+                    Memory(
+                        content="Usuario prefere respostas curtas",
+                        category=MemoryCategory.PROFILE,
+                        source=MemorySource.EXPLICIT,
+                        confidence=0.9,
+                        recency_weight=1.0,
+                        scope="global",
+                    )
+                ]
+            ),
+        )
+
+        await self.runtime.respond_text("Me lembra do resumo")
+
+        memory_system = cast(Any, self.runtime.memory_system)
+        self.assertEqual(
+            memory_system.calls,
+            [("Me lembra do resumo", RouteTarget.HOT_PATH, None)],
+        )
+        memory_messages = [
+            message.content
+            for message in (self.runtime.hot_path_adapter.messages or [])
+            if message.role == Role.SYSTEM and "Memorias relevantes" in message.content
+        ]
+        self.assertEqual(len(memory_messages), 1)
+        self.assertIn("Usuario prefere respostas curtas", memory_messages[0])
+
+    async def test_runtime_uses_deliberative_memory_policy_for_complex_requests(self):
+        capturing_adapter = CapturingHotPathAdapter()
+        self.runtime.deliberative_adapter = capturing_adapter
+        self.runtime.memory_system = cast(
+            Any,
+            FakeMemorySystem(
+                [
+                    Memory(
+                        content="Projeto jarvis usa sqlite vec para busca semantica",
+                        category=MemoryCategory.PROCEDURAL,
+                        source=MemorySource.EXPLICIT,
+                        confidence=0.85,
+                        recency_weight=1.0,
+                        scope="project:jarvis",
+                    )
+                ]
+            ),
+        )
+
+        await self.runtime.respond_text(
+            "Analisa esse erro e explica por que ele quebra"
+        )
+
+        memory_system = cast(Any, self.runtime.memory_system)
+        self.assertEqual(
+            memory_system.calls,
+            [
+                (
+                    "Analisa esse erro e explica por que ele quebra",
+                    RouteTarget.DELIBERATIVE,
+                    None,
+                )
+            ],
+        )
+        memory_messages = [
+            message.content
+            for message in (capturing_adapter.messages or [])
+            if message.role == Role.SYSTEM and "Memorias relevantes" in message.content
+        ]
+        self.assertEqual(len(memory_messages), 1)
+        self.assertIn("project:jarvis", memory_messages[0])
+
+    async def test_runtime_skips_memory_recall_for_direct_tools(self):
+        self.runtime.memory_system = cast(Any, FakeMemorySystem())
+
+        await self.runtime.respond_text("Que horas sao agora?")
+
+        memory_system = cast(Any, self.runtime.memory_system)
+        self.assertEqual(memory_system.calls, [])
 
     async def test_runtime_events_include_session_turn_and_backend_metadata(self):
         subscription = await self.runtime.event_bus.subscribe(

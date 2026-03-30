@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sqlite3
 import struct
 import uuid
@@ -87,6 +88,20 @@ def _row_to_memory(row: sqlite3.Row) -> Memory:
     )
 
 
+def _row_to_memory_with_overrides(
+    row: sqlite3.Row,
+    *,
+    recency_weight: float | None = None,
+    last_accessed: datetime | None = None,
+) -> Memory:
+    memory = _row_to_memory(row)
+    if recency_weight is not None:
+        memory.recency_weight = recency_weight
+    if last_accessed is not None:
+        memory.last_accessed = last_accessed
+    return memory
+
+
 class MemoryStore:
     """Persistent memory store backed by SQLite + FTS5 + sqlite-vec.
 
@@ -113,7 +128,9 @@ class MemoryStore:
         embedding_provider: Optional[EmbeddingProvider] = None,
     ) -> None:
         self._db_path = str(db_path)
-        self._embedding = embedding_provider or EmbeddingProvider(preferred_backend="auto")
+        self._embedding = embedding_provider or EmbeddingProvider(
+            preferred_backend="auto"
+        )
         self._conn: Optional[sqlite3.Connection] = None
         self._vec_available = False
         self._init_lock = asyncio.Lock()
@@ -190,13 +207,15 @@ class MemoryStore:
         Falls back to FTS5 if the vec backend is unavailable.
         Target latency: < 50ms (dominated by embedding generation).
         """
+        if not query.strip():
+            return []
         await self._ensure_open()
         if not self._vec_available:
             logger.debug("sqlite-vec not available; falling back to FTS5 search")
             return await self.search_fts(query, top_k)
 
         query_bytes = await self._embedding.embed(query)
-        return await asyncio.to_thread(self._sync_vec_search, query_bytes, top_k)
+        return await asyncio.to_thread(self._sync_vec_search, query, query_bytes, top_k)
 
     async def search(self, query: str, top_k: int = 5) -> List[Memory]:
         """Hybrid search: FTS5 first, then deduplicate with semantic results."""
@@ -244,7 +263,8 @@ class MemoryStore:
             logger.debug("sqlite-vec loaded — semantic search enabled")
         except Exception as exc:
             logger.info(
-                "sqlite-vec not available (%s) — semantic search disabled, FTS5 only", exc
+                "sqlite-vec not available (%s) — semantic search disabled, FTS5 only",
+                exc,
             )
             self._vec_available = False
 
@@ -282,21 +302,25 @@ class MemoryStore:
 
     def _sync_fts_search(self, query: str, top_k: int) -> List[Memory]:
         assert self._conn is not None
+        candidate_limit = max(top_k * 4, top_k)
         rows = self._conn.execute(
             """
             SELECT m.*
             FROM memories m
             JOIN memories_fts f ON m.rowid = f.rowid
             WHERE memories_fts MATCH ?
-            ORDER BY rank
+            ORDER BY bm25(memories_fts)
             LIMIT ?
             """,
-            (query, top_k),
+            (query, candidate_limit),
         ).fetchall()
-        return [_row_to_memory(r) for r in rows]
+        return self._rerank_and_mark_accessed(rows, query, top_k)
 
-    def _sync_vec_search(self, query_bytes: bytes, top_k: int) -> List[Memory]:
+    def _sync_vec_search(
+        self, query: str, query_bytes: bytes, top_k: int
+    ) -> List[Memory]:
         assert self._conn is not None
+        candidate_limit = max(top_k * 4, top_k)
         rows = self._conn.execute(
             """
             SELECT m.*
@@ -306,9 +330,9 @@ class MemoryStore:
             ORDER BY distance
             LIMIT ?
             """,
-            (query_bytes, top_k),
+            (query_bytes, candidate_limit),
         ).fetchall()
-        return [_row_to_memory(r) for r in rows]
+        return self._rerank_and_mark_accessed(rows, query, top_k)
 
     def _sync_list_all(self, limit: int) -> List[Memory]:
         assert self._conn is not None
@@ -325,6 +349,90 @@ class MemoryStore:
         )
         self._conn.commit()
 
+    def _rerank_and_mark_accessed(
+        self, rows: list[sqlite3.Row], query: str, top_k: int
+    ) -> list[Memory]:
+        if not rows:
+            return []
+
+        ranked_rows = sorted(
+            list(enumerate(rows)),
+            key=lambda item: self._memory_rank(
+                item[1],
+                query=query,
+                source_index=item[0],
+                total_candidates=len(rows),
+            ),
+            reverse=True,
+        )[:top_k]
+        selected_rows = [row for _, row in ranked_rows]
+        accessed_at = datetime.now(tz=timezone.utc)
+        self._sync_mark_accessed([row["id"] for row in selected_rows], accessed_at)
+        return [
+            _row_to_memory_with_overrides(
+                row,
+                recency_weight=self._decayed_recency(row, now=accessed_at),
+                last_accessed=accessed_at,
+            )
+            for row in selected_rows
+        ]
+
+    def _sync_mark_accessed(
+        self, memory_ids: list[str], accessed_at: datetime | None = None
+    ) -> None:
+        assert self._conn is not None
+        if not memory_ids:
+            return
+
+        timestamp = (accessed_at or datetime.now(tz=timezone.utc)).isoformat()
+        self._conn.executemany(
+            "UPDATE memories SET last_accessed = ? WHERE id = ?",
+            [(timestamp, memory_id) for memory_id in memory_ids],
+        )
+        self._conn.commit()
+
+    def _memory_rank(
+        self,
+        row: sqlite3.Row,
+        *,
+        query: str,
+        source_index: int,
+        total_candidates: int,
+    ) -> float:
+        signal_score = 1.0 - (source_index / (total_candidates + 1))
+        confidence = max(0.0, min(1.0, float(row["confidence"])))
+        recency_score = self._decayed_recency(row)
+        scope_score = self._scope_score(str(row["scope"]), query)
+        return (
+            signal_score * 0.45
+            + confidence * 0.35
+            + recency_score * 0.15
+            + scope_score * 0.05
+        )
+
+    def _decayed_recency(self, row: sqlite3.Row, now: datetime | None = None) -> float:
+        reference = now or datetime.now(tz=timezone.utc)
+        last_accessed = datetime.fromisoformat(row["last_accessed"])
+        hours_since_access = max(
+            0.0, (reference - last_accessed).total_seconds() / 3600.0
+        )
+        decay = math.exp(-hours_since_access / 168.0)
+        return max(0.05, min(1.0, float(row["recency_weight"]) * decay))
+
+    @staticmethod
+    def _scope_score(scope: str, query: str) -> float:
+        normalized_query = query.lower()
+        if scope == "global":
+            return 1.0
+        if scope == "session":
+            return 0.85
+        if scope.startswith("project:"):
+            project_name = scope.split(":", 1)[1]
+            if project_name and project_name in normalized_query:
+                return 1.15
+            return 0.7
+        return 0.8
+
     # ------------------------------------------------------------------
     # Async embedding fire-and-forget
     # ------------------------------------------------------------------
@@ -334,7 +442,9 @@ class MemoryStore:
             return
         try:
             embedding_bytes = await self._embedding.embed(content)
-            await asyncio.to_thread(self._sync_store_embedding, memory_id, embedding_bytes)
+            await asyncio.to_thread(
+                self._sync_store_embedding, memory_id, embedding_bytes
+            )
         except Exception as exc:
             logger.warning("Failed to embed memory %s: %s", memory_id, exc)
 

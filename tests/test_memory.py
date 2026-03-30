@@ -4,17 +4,22 @@ All tests run without ML dependencies (no MLX, no sentence-transformers).
 The EmbeddingProvider falls back to the deterministic stub backend.
 The MemoryStore uses :memory: SQLite — no filesystem required.
 """
+
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 import pytest
 
 from jarvis.memory.embedding import EmbeddingProvider, EMBEDDING_DIM, _serialize_f32
 from jarvis.memory.provenance import ProvenanceEnricher
 from jarvis.memory.relevance import RelevanceClassifier, RelevanceDecision
 from jarvis.memory.store import MemoryStore
+from jarvis.memory.system import MemorySystem
 from jarvis.adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
 from jarvis.models.memory import MemoryCategory, MemorySource
+from jarvis.models.conversation import RouteTarget
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +68,7 @@ def test_serialize_f32():
     blob = _serialize_f32(vec)
     assert len(blob) == len(vec) * 4
     import struct
+
     unpacked = struct.unpack("4f", blob)
     assert abs(unpacked[0] - 0.1) < 1e-6
 
@@ -135,6 +141,13 @@ class TestRelevanceClassifier:
     def test_obrigado_skipped(self):
         result = self.clf.classify("obrigado!", "De nada!")
         assert result.decision == RelevanceDecision.SKIP
+
+    def test_procedural_content_is_classified_as_procedural(self):
+        result = self.clf.classify(
+            "o comando e uv sync para instalar as dependencias",
+            "entendido",
+        )
+        assert result.category == MemoryCategory.PROCEDURAL
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +230,56 @@ async def test_memory_store_search_empty_query_returns_empty():
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_memory_store_search_updates_last_accessed():
+    store = MemoryStore(
+        db_path=":memory:",
+        embedding_provider=EmbeddingProvider(preferred_backend="stub"),
+    )
+    await store.open()
+    memory = await store.save(
+        content="meu nome é Ygor",
+        category=MemoryCategory.PROFILE,
+        source=MemorySource.EXPLICIT,
+        confidence=0.9,
+    )
+    before = memory.last_accessed
+
+    await asyncio.sleep(0.01)
+    results = await store.search_fts("Ygor", top_k=1)
+
+    assert len(results) == 1
+    assert results[0].last_accessed > before
+    await store.close()
+
+
+def test_memory_store_decay_and_scope_helpers():
+    store = MemoryStore(
+        db_path=":memory:",
+        embedding_provider=EmbeddingProvider(preferred_backend="stub"),
+    )
+    now = datetime.now(tz=timezone.utc)
+    recent_row = {
+        "last_accessed": now.isoformat(),
+        "recency_weight": 1.0,
+        "confidence": 0.8,
+        "scope": "global",
+    }
+    stale_row = {
+        "last_accessed": (now - timedelta(days=30)).isoformat(),
+        "recency_weight": 1.0,
+        "confidence": 0.8,
+        "scope": "global",
+    }
+
+    assert store._decayed_recency(
+        cast(Any, recent_row), now=now
+    ) > store._decayed_recency(cast(Any, stale_row), now=now)
+    assert store._scope_score(
+        "project:jarvis", "analisa o projeto jarvis"
+    ) > store._scope_score("project:jarvis", "abre o safari")
+
+
 # ---------------------------------------------------------------------------
 # SQLiteVecMemoryAdapter (high-level)
 # ---------------------------------------------------------------------------
@@ -232,6 +295,7 @@ async def test_adapter_maybe_persist_relevant():
     )
     assert memory is not None
     assert "Ygor" in memory.content
+    assert memory.category == MemoryCategory.PROFILE
     await adapter.close()
 
 
@@ -269,11 +333,59 @@ async def test_adapter_search_empty_store():
     await adapter.close()
 
 
+@pytest.mark.asyncio
+async def test_adapter_persists_procedural_category_when_detected():
+    adapter = SQLiteVecMemoryAdapter(db_path=":memory:", embedding_backend="stub")
+    await adapter.open()
+    memory = await adapter.maybe_persist_turn(
+        user_text="o comando e uv sync para instalar as dependencias",
+        assistant_text="anotado",
+    )
+    assert memory is not None
+    assert memory.category == MemoryCategory.PROCEDURAL
+    await adapter.close()
+
+
 def test_adapter_should_persist_true():
     adapter = SQLiteVecMemoryAdapter(db_path=":memory:", embedding_backend="stub")
-    assert adapter.should_persist({"user_text": "meu nome é Ygor", "assistant_text": ""})
+    assert adapter.should_persist(
+        {"user_text": "meu nome é Ygor", "assistant_text": ""}
+    )
 
 
 def test_adapter_should_persist_false_smalltalk():
     adapter = SQLiteVecMemoryAdapter(db_path=":memory:", embedding_backend="stub")
     assert not adapter.should_persist({"user_text": "olá", "assistant_text": "Olá!"})
+
+
+@pytest.mark.asyncio
+async def test_memory_system_uses_route_specific_recall_policy():
+    calls = []
+
+    class FakeAdapter:
+        async def search_fts(self, query: str, top_k: int = 5):
+            calls.append(("fts", query, top_k))
+            return []
+
+        async def search_semantic(self, query: str, top_k: int = 5):
+            calls.append(("semantic", query, top_k))
+            return []
+
+        async def maybe_persist_turn(self, user_text: str, assistant_text: str):
+            calls.append(("persist", user_text, assistant_text))
+            return None
+
+    system = MemorySystem(FakeAdapter(), hot_path_top_k=2, deliberative_top_k=4)
+
+    assert await system.recall("me lembra do resumo", RouteTarget.HOT_PATH) == []
+    assert (
+        await system.recall("analisa o projeto jarvis", RouteTarget.DELIBERATIVE) == []
+    )
+    assert await system.recall("que horas sao", RouteTarget.DIRECT_TOOL) == []
+    await system.maybe_persist_turn("foo", "bar")
+
+    assert calls == [
+        ("fts", "me lembra do resumo", 2),
+        ("semantic", "analisa o projeto jarvis", 4),
+        ("persist", "foo", "bar"),
+    ]

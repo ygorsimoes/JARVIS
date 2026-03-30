@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Deque, Iterable, List, Optional
 
-from ..models.conversation import Message, Role, Turn
+from ..models.conversation import Message, Role, RouteTarget, Turn
 from ..models.memory import Memory
 from ..prompts import MEMORY_PREAMBLE
 
@@ -21,30 +21,59 @@ class DialogueManager:
     def working_memory(self) -> List[Turn]:
         return list(self._working_memory)
 
-    def record_turn(self, role: Role, content: str, metadata: Optional[dict] = None) -> Turn:
+    def record_turn(
+        self, role: Role, content: str, metadata: Optional[dict] = None
+    ) -> Turn:
         turn = Turn(role=role, content=content, metadata=metadata or {})
         self._working_memory.append(turn)
         return turn
 
-    def compose_messages(self, user_text: str, recalled_memories: Optional[Iterable[Memory]] = None) -> List[Message]:
-        messages: List[Message] = [Message(role=Role.SYSTEM, content=self._system_prompt)]
+    def compose_messages(
+        self,
+        user_text: str,
+        recalled_memories: Optional[Iterable[Memory]] = None,
+        route_target: RouteTarget | None = None,
+    ) -> List[Message]:
+        messages: List[Message] = [
+            Message(role=Role.SYSTEM, content=self._system_prompt)
+        ]
 
-        memory_block = self._format_memory_block(recalled_memories or [])
+        memory_block = self._format_memory_block(
+            recalled_memories or [], route_target=route_target
+        )
         if memory_block:
             messages.append(Message(role=Role.SYSTEM, content=memory_block))
 
         for turn in self._working_memory:
-            messages.append(Message(role=turn.role, content=turn.content, metadata=dict(turn.metadata)))
+            messages.append(
+                Message(
+                    role=turn.role, content=turn.content, metadata=dict(turn.metadata)
+                )
+            )
 
         messages.append(Message(role=Role.USER, content=user_text))
         return messages
 
-    def _format_memory_block(self, recalled_memories: Iterable[Memory]) -> str:
+    def _format_memory_block(
+        self,
+        recalled_memories: Iterable[Memory],
+        route_target: RouteTarget | None = None,
+    ) -> str:
+        limit = 4 if route_target == RouteTarget.DELIBERATIVE else 2
         lines = []
-        for memory in recalled_memories:
+        for memory in list(recalled_memories)[:limit]:
+            content = memory.content.strip()
+            if len(content) > 140:
+                content = content[:137].rstrip() + "..."
+            scope_suffix = "" if memory.scope == "global" else " %s" % memory.scope
             lines.append(
-                "- [%s/%s %.2f] %s"
-                % (memory.category.value, memory.source.value, memory.confidence, memory.content)
+                "- [%s %.2f%s] %s"
+                % (
+                    memory.category.value,
+                    memory.confidence,
+                    scope_suffix,
+                    content,
+                )
             )
         if not lines:
             return ""

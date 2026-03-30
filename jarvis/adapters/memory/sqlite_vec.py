@@ -83,17 +83,37 @@ class SQLiteVecMemoryAdapter:
             logger.warning("Memory search failed: %s", exc)
             return []
 
+    async def search_fts(self, query: str, top_k: int = 5) -> List[Memory]:
+        if not query.strip():
+            return []
+        try:
+            return await self._store.search_fts(query, top_k=top_k)
+        except Exception as exc:
+            logger.warning("FTS memory search failed: %s", exc)
+            return []
+
+    async def search_semantic(self, query: str, top_k: int = 5) -> List[Memory]:
+        if not query.strip():
+            return []
+        try:
+            return await self._store.search_semantic(query, top_k=top_k)
+        except Exception as exc:
+            logger.warning("Semantic memory search failed: %s", exc)
+            return []
+
     async def save(self, content: str, metadata: Optional[dict] = None) -> Memory:
         """Persist a memory with auto-detected provenance."""
         meta = metadata or {}
         inferred = meta.get("inferred", False)
         enriched = self._provenance.enrich(content, inferred=inferred)
 
-        category_str = meta.get("category", MemoryCategory.EPISODIC.value)
+        classification = self._relevance.classify(content, "")
+        default_category = classification.category or MemoryCategory.EPISODIC
+        category_str = meta.get("category", default_category.value)
         try:
             category = MemoryCategory(category_str)
         except ValueError:
-            category = MemoryCategory.EPISODIC
+            category = default_category
 
         return await self._store.save(
             content=content,
@@ -123,7 +143,7 @@ class SQLiteVecMemoryAdapter:
         self,
         user_text: str,
         assistant_text: str,
-        category: MemoryCategory = MemoryCategory.EPISODIC,
+        category: MemoryCategory | None = None,
     ) -> Optional[Memory]:
         """Classify the turn and persist it if relevant.
 
@@ -138,9 +158,10 @@ class SQLiteVecMemoryAdapter:
 
         # Use user_text as the canonical content to store.
         enriched = self._provenance.enrich(user_text)
+        resolved_category = category or result.category or MemoryCategory.EPISODIC
         memory = await self._store.save(
             content=user_text,
-            category=category,
+            category=resolved_category,
             source=enriched.source,
             confidence=enriched.confidence,
             recency_weight=enriched.recency_weight,
@@ -158,6 +179,7 @@ class SQLiteVecMemoryAdapter:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
 
 def _extract_text(obj: Any, key: str) -> str:
     if isinstance(obj, dict):

@@ -4,13 +4,15 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from ..models.memory import MemoryCategory
+
 
 class RelevanceDecision(str, Enum):
     """Outcome of the relevance classifier for a given turn."""
 
-    PERSIST = "persist"      # Save to long-term memory.
-    SKIP = "skip"            # Too ephemeral or low-value.
-    SESSION_ONLY = "session" # Keep in working memory, do not persist.
+    PERSIST = "persist"  # Save to long-term memory.
+    SKIP = "skip"  # Too ephemeral or low-value.
+    SESSION_ONLY = "session"  # Keep in working memory, do not persist.
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class ClassificationResult:
     decision: RelevanceDecision
     reason: str
     score: float
+    category: MemoryCategory | None = None
 
 
 class RelevanceClassifier:
@@ -115,6 +118,7 @@ class RelevanceClassifier:
                 decision=RelevanceDecision.SKIP,
                 reason="small talk",
                 score=0.05,
+                category=None,
             )
 
         if len(user_text.strip()) < self._SHORT_THRESHOLD:
@@ -122,9 +126,11 @@ class RelevanceClassifier:
                 decision=RelevanceDecision.SKIP,
                 reason="too short",
                 score=0.10,
+                category=None,
             )
 
         score = 0.0
+        category = self._infer_category(combined)
 
         if self._PERSONAL_FACT_RE.search(combined):
             score += 0.70
@@ -133,7 +139,7 @@ class RelevanceClassifier:
             score += 0.30
 
         if self._PROCEDURE_RE.search(combined):
-            score += 0.25
+            score += 0.55
 
         score = min(1.0, score)
 
@@ -142,6 +148,7 @@ class RelevanceClassifier:
                 decision=RelevanceDecision.PERSIST,
                 reason="relevant personal/procedural content (score=%.2f)" % score,
                 score=score,
+                category=category,
             )
 
         if score >= 0.2:
@@ -149,10 +156,21 @@ class RelevanceClassifier:
                 decision=RelevanceDecision.SESSION_ONLY,
                 reason="low relevance — keep in session only (score=%.2f)" % score,
                 score=score,
+                category=category,
             )
 
         return ClassificationResult(
             decision=RelevanceDecision.SKIP,
             reason="ephemeral content (score=%.2f)" % score,
             score=score,
+            category=category,
         )
+
+    def _infer_category(self, content: str) -> MemoryCategory:
+        if self._PERSONAL_FACT_RE.search(content) or self._PREFERENCE_RE.search(
+            content
+        ):
+            return MemoryCategory.PROFILE
+        if self._PROCEDURE_RE.search(content):
+            return MemoryCategory.PROCEDURAL
+        return MemoryCategory.EPISODIC
