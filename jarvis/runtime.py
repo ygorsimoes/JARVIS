@@ -490,7 +490,7 @@ class JarvisRuntime:
         backend_name = route.tool_name
         messages = None
         if route.target != RouteTarget.DIRECT_TOOL:
-            llm_plan = self.policy_engine.select_llm(
+            llm_plan = await self.policy_engine.select_llm(
                 route=route,
                 hot_path_adapter=self.hot_path_adapter,
                 hot_path_backend_name=self.hot_path_backend_name,

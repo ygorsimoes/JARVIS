@@ -67,6 +67,9 @@ def build_runtime_adapters(
         deliberative_llm = MLXLMAdapter(
             model_repo=config.llm_deliberative_model,
             max_tokens=config.llm_response_max_tokens,
+            temperature=config.llm_deliberative_temperature,
+            top_p=config.llm_deliberative_top_p,
+            repetition_penalty=config.llm_deliberative_repetition_penalty,
         )
         deliberative_backend_name = "mlx_lm"
     elif config.llm_deliberative == "fake":

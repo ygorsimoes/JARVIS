@@ -9,7 +9,14 @@ import uuid
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import AsyncIterator, Awaitable, Callable, Deque, List, Optional
+from typing import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Deque,
+    List,
+    Optional,
+)
 
 from ...models.conversation import Message, Role
 
@@ -33,6 +40,7 @@ class FoundationModelsBridgeAdapter:
         self._stderr_lines: Deque[str] = deque(maxlen=50)
         self._startup_lock = asyncio.Lock()
         self._owns_process = False
+        self._session_tools_signature: Optional[str] = None
 
     async def reset_session(self) -> None:
         await self.close_session()
@@ -54,6 +62,7 @@ class FoundationModelsBridgeAdapter:
             pass
         finally:
             self.session_id = None
+            self._session_tools_signature = None
 
     async def cancel_current_response(self) -> bool:
         if not self.session_id:
@@ -115,11 +124,18 @@ class FoundationModelsBridgeAdapter:
     ) -> AsyncIterator[str]:
         del max_kv_size
         await self._ensure_service_running()
-        await self._ensure_session(tools)
+        session_created = await self._ensure_session(tools)
         prompt = self._last_user_message(messages)
+        if not prompt:
+            raise RuntimeError("foundation models adapter requires a user prompt")
+        response_messages = [self._serialize_message(messages[-1])] if messages else []
+        if session_created:
+            response_messages = [
+                self._serialize_message(message) for message in messages
+            ]
         payload = {
             "prompt": prompt,
-            "messages": [self._serialize_message(message) for message in messages],
+            "messages": response_messages,
             "stream": True,
         }
 
@@ -167,8 +183,13 @@ class FoundationModelsBridgeAdapter:
                                 raise RuntimeError(
                                     "bridge emitted tool args that are not an object"
                                 )
+
+                            async def invoke_tool() -> object:
+                                return await tool_invoker(tool_name, args)
+
                             future = asyncio.run_coroutine_threadsafe(
-                                tool_invoker(tool_name, args), loop
+                                invoke_tool(),
+                                loop,
                             )
                             try:
                                 result = future.result()
@@ -203,9 +224,12 @@ class FoundationModelsBridgeAdapter:
                 raise item
             yield item
 
-    async def _ensure_session(self, tools: List[dict]) -> None:
-        if self.session_id:
-            return
+    async def _ensure_session(self, tools: List[dict]) -> bool:
+        tools_signature = json.dumps(tools, sort_keys=True)
+        if self.session_id and self._session_tools_signature == tools_signature:
+            return False
+        if self.session_id and self._session_tools_signature != tools_signature:
+            await self.close_session()
         payload = {
             "instructions": self.instructions,
             "tools": tools,
@@ -222,6 +246,8 @@ class FoundationModelsBridgeAdapter:
         await asyncio.to_thread(response.close)
         parsed = json.loads(body.decode("utf-8"))
         self.session_id = parsed["session_id"]
+        self._session_tools_signature = tools_signature
+        return True
 
     async def _ensure_service_running(self) -> None:
         if await self.healthcheck():

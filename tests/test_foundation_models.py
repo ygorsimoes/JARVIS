@@ -238,6 +238,39 @@ class FoundationModelsAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(_BridgeHandler.created_session_count, 1)
         self.assertEqual(adapter.session_id, "session-123")
+        response_payload = _BridgeHandler.response_payload
+        assert response_payload is not None
+        self.assertEqual(len(response_payload["messages"]), 1)
+        self.assertEqual(response_payload["messages"][0]["content"], "Segundo turno")
+
+    async def test_chat_stream_recreates_session_when_tool_definitions_change(self):
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url, instructions="Teste"
+        )
+        messages = [Message(role=Role.USER, content="Primeiro turno")]
+
+        async def tool_invoker(tool_name, args):
+            self.assertEqual(tool_name, "system.get_time")
+            self.assertEqual(args, {})
+            return {"time": "12:34"}
+
+        async for _ in adapter.chat_stream(
+            messages=messages,
+            tools=[],
+            max_kv_size=0,
+            tool_invoker=tool_invoker,
+        ):
+            pass
+
+        async for _ in adapter.chat_stream(
+            messages=[Message(role=Role.USER, content="Segundo turno")],
+            tools=[{"name": "system.get_time"}],
+            max_kv_size=0,
+            tool_invoker=tool_invoker,
+        ):
+            pass
+
+        self.assertEqual(_BridgeHandler.created_session_count, 2)
 
     async def test_cancel_and_close_session(self):
         adapter = FoundationModelsBridgeAdapter(

@@ -26,6 +26,18 @@ class ComplexityRouterTests(unittest.TestCase):
         decision = self.router.route("Me lembra do resumo")
         self.assertEqual(decision.target, RouteTarget.HOT_PATH)
 
+    def test_routes_multiple_direct_actions_to_deliberative(self):
+        decision = self.router.route("Abre o Safari e pesquise arquitetura hexagonal")
+        self.assertEqual(decision.target, RouteTarget.DELIBERATIVE)
+
+    def test_routes_memory_heavy_prompt_to_deliberative(self):
+        decision = self.router.route("Me lembra do contexto", recalled_memories=2)
+        self.assertEqual(decision.target, RouteTarget.DELIBERATIVE)
+
+    def test_routes_tool_chain_depth_to_deliberative(self):
+        decision = self.router.route("Abre o Safari", tool_chain_depth=2)
+        self.assertEqual(decision.target, RouteTarget.DELIBERATIVE)
+
 
 if __name__ == "__main__":
     unittest.main()

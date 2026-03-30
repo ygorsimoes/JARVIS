@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Iterable, Pattern
+from dataclasses import dataclass
+from typing import Pattern
 
 from ..models.conversation import RouteDecision, RouteTarget
 
@@ -19,7 +19,10 @@ class ComplexityRouter:
         self._direct_intents = (
             _DirectIntent(
                 tool_name="system.get_time",
-                pattern=re.compile(r"\b(que horas s[aã]o|que horas e|hor[aá]rio agora)\b", re.IGNORECASE),
+                pattern=re.compile(
+                    r"\b(que horas s[aã]o|que horas e|hor[aá]rio agora)\b",
+                    re.IGNORECASE,
+                ),
                 reason="consulta objetiva de horario",
             ),
             _DirectIntent(
@@ -29,7 +32,10 @@ class ComplexityRouter:
             ),
             _DirectIntent(
                 tool_name="browser.search",
-                pattern=re.compile(r"\b(pesquise|procure|busque na web|pesquisa na web)\b", re.IGNORECASE),
+                pattern=re.compile(
+                    r"\b(pesquise|procure|busque na web|pesquisa na web)\b",
+                    re.IGNORECASE,
+                ),
                 reason="busca direta na web",
             ),
             _DirectIntent(
@@ -47,13 +53,21 @@ class ComplexityRouter:
             "compare",
             "plano",
             "estrategia",
-            "estrategia",
             "debug",
             "erro",
             "arquitetura",
             "planeje",
             "resuma",
             "resume",
+            "implemente",
+            "corrija",
+            "refatore",
+            "teste",
+            "codigo",
+            "código",
+            "função",
+            "funcao",
+            "arquivo",
         )
         self._multi_step_markers = (
             "depois",
@@ -61,6 +75,10 @@ class ComplexityRouter:
             "passo a passo",
             "liste",
             "organize",
+            "primeiro",
+            "segundo",
+            "entao",
+            "então",
         )
         self._subordinate_markers = (
             " porque ",
@@ -68,6 +86,7 @@ class ComplexityRouter:
             " embora ",
             " se ",
             " enquanto ",
+            " para que ",
         )
 
     def route(
@@ -78,19 +97,42 @@ class ComplexityRouter:
         recent_turns: int = 0,
     ) -> RouteDecision:
         normalized = " ".join(text.strip().lower().split())
-        for intent in self._direct_intents:
-            if intent.pattern.search(normalized):
-                return RouteDecision(
-                    target=RouteTarget.DIRECT_TOOL,
-                    tool_name=intent.tool_name,
-                    reason=intent.reason,
-                    confidence=0.95,
-                )
+        if not normalized:
+            return RouteDecision(
+                target=RouteTarget.HOT_PATH,
+                reason="pedido vazio tratado pelo hot path",
+                confidence=0.4,
+            )
 
+        direct_matches = [
+            intent
+            for intent in self._direct_intents
+            if intent.pattern.search(normalized)
+        ]
         token_count = self._token_count(normalized)
-        subordinate_hits = sum(marker in normalized for marker in self._subordinate_markers)
+        subordinate_hits = sum(
+            marker in normalized for marker in self._subordinate_markers
+        )
         reasoning_hits = sum(marker in normalized for marker in self._reasoning_markers)
-        multi_step_hits = sum(marker in normalized for marker in self._multi_step_markers)
+        multi_step_hits = sum(
+            marker in normalized for marker in self._multi_step_markers
+        )
+        estimated_tool_depth = max(
+            tool_chain_depth,
+            self._estimate_tool_chain_depth(normalized, direct_matches),
+        )
+        complexity_score = 0
+        complexity_score += reasoning_hits
+        complexity_score += multi_step_hits
+        complexity_score += subordinate_hits
+        complexity_score += min(recalled_memories, 2)
+        complexity_score += min(max(estimated_tool_depth - 1, 0), 2)
+        if token_count > 12:
+            complexity_score += 1
+        if token_count > 24:
+            complexity_score += 1
+        if recent_turns > 8:
+            complexity_score += 1
 
         if recalled_memories > 0:
             return RouteDecision(
@@ -99,18 +141,27 @@ class ComplexityRouter:
                 confidence=0.85,
             )
 
-        if tool_chain_depth > 0 or reasoning_hits > 0 or multi_step_hits > 0:
+        if len(direct_matches) > 1 or estimated_tool_depth > 1:
             return RouteDecision(
                 target=RouteTarget.DELIBERATIVE,
-                reason="pedido com sinal de raciocinio ou multiplas etapas",
-                confidence=0.9,
+                reason="pedido combina multiplas acoes ou depende de cadeia de tools",
+                confidence=0.92,
             )
 
-        if subordinate_hits > 1 or token_count > 12 or recent_turns > 8:
+        if direct_matches and complexity_score <= 1:
+            intent = direct_matches[0]
+            return RouteDecision(
+                target=RouteTarget.DIRECT_TOOL,
+                tool_name=intent.tool_name,
+                reason=intent.reason,
+                confidence=0.95,
+            )
+
+        if reasoning_hits > 0 or multi_step_hits > 0 or complexity_score >= 2:
             return RouteDecision(
                 target=RouteTarget.DELIBERATIVE,
-                reason="pedido longo ou contextual demais para hot path",
-                confidence=0.8,
+                reason="pedido com sinais de raciocinio, contexto ou multiplas etapas",
+                confidence=0.88,
             )
 
         return RouteDecision(
@@ -118,6 +169,21 @@ class ComplexityRouter:
             reason="pedido curto e simples para resposta rapida",
             confidence=0.8,
         )
+
+    def _estimate_tool_chain_depth(
+        self, normalized: str, direct_matches: list[_DirectIntent]
+    ) -> int:
+        action_markers = 0
+        action_markers += normalized.count(" e depois ")
+        action_markers += normalized.count(" e entao ")
+        action_markers += normalized.count(" e então ")
+        action_markers += normalized.count(" depois ")
+        action_markers += normalized.count(" em seguida ")
+        if len(direct_matches) > 1:
+            return len(direct_matches)
+        if action_markers <= 0:
+            return 1 if direct_matches else 0
+        return max(2, action_markers + 1)
 
     @staticmethod
     def _token_count(text: str) -> int:
