@@ -88,10 +88,12 @@ class ToolCallingHotPathAdapter:
 class CapturingHotPathAdapter:
     def __init__(self):
         self.messages = None
+        self.tools = None
 
     async def chat_stream(self, messages, tools, max_kv_size, tool_invoker=None):
-        del tools, max_kv_size, tool_invoker
+        del max_kv_size, tool_invoker
         self.messages = list(messages)
+        self.tools = list(tools)
         yield "Resposta curta."
 
     async def cancel_current_response(self) -> bool:
@@ -222,6 +224,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             if message.role == Role.USER
         ]
         self.assertEqual(user_messages, ["Me lembra do resumo"])
+
+    async def test_runtime_only_exposes_capability_enabled_tools_to_llm(self):
+        self.runtime.hot_path_adapter = CapturingHotPathAdapter()
+
+        await self.runtime.respond_text("Me lembra do resumo")
+
+        tool_names = [
+            tool["name"] for tool in (self.runtime.hot_path_adapter.tools or [])
+        ]
+        self.assertIn("browser.fetch_url", tool_names)
+        self.assertIn("calendar.list_events", tool_names)
+        self.assertIn("files.list", tool_names)
+        self.assertIn("files.read", tool_names)
+        self.assertNotIn("shell.execute", tool_names)
+        self.assertNotIn("files.move", tool_names)
 
     async def test_runtime_events_include_session_turn_and_backend_metadata(self):
         subscription = await self.runtime.event_bus.subscribe(

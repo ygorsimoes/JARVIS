@@ -65,23 +65,39 @@ class CapabilityBroker:
             raise CapabilityDeniedError("capability %s is not registered" % tool_name)
         return capability
 
-    def authorize(self, tool_name: str, scope: str = "global", confirmed: bool = False) -> Capability:
+    def authorize(
+        self, tool_name: str, scope: str = "global", confirmed: bool = False
+    ) -> Capability:
         capability = self.get(tool_name)
         if not capability.enabled:
             self._record(tool_name, scope, False, "disabled")
             raise CapabilityDeniedError("capability %s is disabled" % tool_name)
         if capability.scope not in {"global", scope}:
             self._record(tool_name, scope, False, "scope mismatch")
-            raise CapabilityDeniedError("capability %s is not enabled for scope %s" % (tool_name, scope))
-        if capability.requires_confirmation or capability.risk_level == RiskLevel.DESTRUCTIVE:
+            raise CapabilityDeniedError(
+                "capability %s is not enabled for scope %s" % (tool_name, scope)
+            )
+        if (
+            capability.requires_confirmation
+            or capability.risk_level == RiskLevel.DESTRUCTIVE
+        ):
             if not confirmed:
                 self._record(tool_name, scope, False, "confirmation required")
-                raise ConfirmationRequiredError("tool %s requires explicit confirmation" % tool_name)
+                raise ConfirmationRequiredError(
+                    "tool %s requires explicit confirmation" % tool_name
+                )
         self._record(tool_name, scope, True, "authorized")
         return capability
 
-    def list_enabled(self) -> list[Capability]:
-        return [capability for capability in self._capabilities.values() if capability.enabled]
+    def list_enabled(self, scope: str = "global") -> list[Capability]:
+        return [
+            capability
+            for capability in self._capabilities.values()
+            if capability.enabled and capability.scope in {"global", scope}
+        ]
+
+    def enabled_tool_names(self, scope: str = "global") -> set[str]:
+        return {capability.tool_name for capability in self.list_enabled(scope=scope)}
 
     @property
     def audit_log(self) -> list[CapabilityAuditEntry]:

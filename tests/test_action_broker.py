@@ -52,6 +52,31 @@ class ActionBrokerTests(unittest.IsolatedAsyncioTestCase):
                 ActionRequest(tool_name="browser.search", arguments={})
             )
 
+    async def test_describe_available_tools_filters_disabled_capabilities(self):
+        registry = ToolRegistry()
+
+        async def search_handler(query: str) -> dict:
+            return {"query": query}
+
+        async def shell_handler(command: str) -> dict:
+            return {"command": command}
+
+        registry.register("browser.search", "Busca na web", search_handler)
+        registry.register("shell.execute", "Comando shell", shell_handler)
+        broker = ActionBroker(
+            CapabilityBroker(
+                [
+                    Capability("browser.search", enabled=True),
+                    Capability("shell.execute", enabled=False),
+                ]
+            ),
+            registry,
+        )
+
+        described = broker.describe_available_tools()
+
+        self.assertEqual([tool["name"] for tool in described], ["browser.search"])
+
 
 if __name__ == "__main__":
     unittest.main()

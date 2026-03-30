@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 from jarvis.tools.browser import BrowserTool
 from jarvis.tools.files import FilesTool
-from jarvis.tools.security import ensure_path_within_roots, normalize_roots
+from jarvis.tools.security import (
+    build_trust_metadata,
+    ensure_path_within_roots,
+    normalize_roots,
+    validate_http_url,
+)
 from jarvis.tools.timer import TimerTool, parse_duration_seconds
 
 
@@ -17,6 +22,12 @@ class SupportModulesTests(unittest.IsolatedAsyncioTestCase):
         open_browser.assert_called_once()
         self.assertEqual(result["query"], "jarvis local ai")
         self.assertIn("duckduckgo.com", result["url"])
+
+    async def test_browser_fetch_url_rejects_non_http_schemes(self):
+        result = await BrowserTool().fetch_url("file:///etc/passwd")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("HTTP(s)", result["error"])
 
     async def test_files_tool_lists_and_reads_only_allowed_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -66,6 +77,19 @@ class SecurityHelpersTests(unittest.TestCase):
 
             self.assertEqual(roots, [root.resolve()])
             self.assertEqual(resolved, child.resolve())
+
+    def test_http_url_validation_and_trust_metadata(self):
+        self.assertEqual(
+            validate_http_url("https://example.com/docs"), "https://example.com/docs"
+        )
+
+        with self.assertRaises(ValueError):
+            validate_http_url("mailto:test@example.com")
+
+        self.assertEqual(
+            build_trust_metadata(source="external_url", trusted=False),
+            {"source": "external_url", "trusted": False},
+        )
 
 
 if __name__ == "__main__":

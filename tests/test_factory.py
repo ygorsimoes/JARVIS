@@ -19,7 +19,7 @@ class RuntimeAdaptersFactoryTests(unittest.TestCase):
     def test_defaults_use_fake_and_noop_backends_without_native_flag(self):
         adapters = build_runtime_adapters(JarvisConfig(), enable_native_backends=False)
 
-        self.assertIsInstance(adapters.activation, PorcupineActivationAdapter)
+        self.assertIsInstance(adapters.activation, PushToTalkActivationAdapter)
         self.assertIsInstance(adapters.stt, SpeechAnalyzerSTTAdapter)
         self.assertIsInstance(adapters.vad, SpeechDetectorAdapter)
         self.assertIsInstance(adapters.hot_path_llm, FakeLLMAdapter)

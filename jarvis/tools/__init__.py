@@ -55,7 +55,8 @@ class ToolRegistry:
         self._validate_input(tool, kwargs)
         return await tool.handler(**kwargs)
 
-    def describe(self) -> list:
+    def describe(self, allowed_names: Optional[set[str]] = None) -> list:
+        allowed = allowed_names if allowed_names is not None else None
         return [
             {
                 "name": tool.name,
@@ -63,6 +64,7 @@ class ToolRegistry:
                 "input_schema": tool.input_schema,
             }
             for tool in self._tools.values()
+            if allowed is None or tool.name in allowed
         ]
 
     def _validate_input(self, tool: RegisteredTool, payload: Dict[str, Any]) -> None:
@@ -76,23 +78,33 @@ class ToolRegistry:
 
         for field_name in required:
             if field_name not in payload:
-                raise ToolValidationError("tool %s requires field %s" % (tool.name, field_name))
+                raise ToolValidationError(
+                    "tool %s requires field %s" % (tool.name, field_name)
+                )
 
         for field_name, value in payload.items():
             field_schema = properties.get(field_name)
             if field_schema is None:
                 if additional_properties:
                     continue
-                raise ToolValidationError("tool %s does not accept field %s" % (tool.name, field_name))
+                raise ToolValidationError(
+                    "tool %s does not accept field %s" % (tool.name, field_name)
+                )
             self._validate_field(tool.name, field_name, value, field_schema)
 
-    def _validate_field(self, tool_name: str, field_name: str, value: Any, schema: Dict[str, Any]) -> None:
+    def _validate_field(
+        self, tool_name: str, field_name: str, value: Any, schema: Dict[str, Any]
+    ) -> None:
         field_type = schema.get("type")
         if field_type == "string" and not isinstance(value, str):
-            raise ToolValidationError("tool %s field %s must be a string" % (tool_name, field_name))
+            raise ToolValidationError(
+                "tool %s field %s must be a string" % (tool_name, field_name)
+            )
         if field_type == "integer":
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ToolValidationError("tool %s field %s must be an integer" % (tool_name, field_name))
+                raise ToolValidationError(
+                    "tool %s field %s must be an integer" % (tool_name, field_name)
+                )
             minimum = schema.get("minimum")
             if minimum is not None and value < minimum:
                 raise ToolValidationError(
@@ -100,9 +112,13 @@ class ToolRegistry:
                 )
         if field_type == "number":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ToolValidationError("tool %s field %s must be a number" % (tool_name, field_name))
+                raise ToolValidationError(
+                    "tool %s field %s must be a number" % (tool_name, field_name)
+                )
         if field_type == "boolean" and not isinstance(value, bool):
-            raise ToolValidationError("tool %s field %s must be a boolean" % (tool_name, field_name))
+            raise ToolValidationError(
+                "tool %s field %s must be a boolean" % (tool_name, field_name)
+            )
 
 
 def build_default_registry(config: JarvisConfig) -> ToolRegistry:
@@ -119,7 +135,11 @@ def build_default_registry(config: JarvisConfig) -> ToolRegistry:
         "system.get_time",
         "Retorna o horario local atual.",
         system_tool.get_time,
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
     )
     registry.register(
         "system.open_app",
@@ -150,7 +170,11 @@ def build_default_registry(config: JarvisConfig) -> ToolRegistry:
         "timer.list",
         "Lista timers ativos.",
         timer_tool.list,
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
     )
     registry.register(
         "timer.cancel",
@@ -204,7 +228,7 @@ def build_default_registry(config: JarvisConfig) -> ToolRegistry:
             "type": "object",
             "properties": {
                 "source_path": {"type": "string"},
-                "destination_path": {"type": "string"}
+                "destination_path": {"type": "string"},
             },
             "required": ["source_path", "destination_path"],
             "additionalProperties": False,

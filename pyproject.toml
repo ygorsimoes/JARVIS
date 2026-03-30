@@ -25,6 +25,9 @@ macos-ml = [
     "mlx-lm>=0.24.0",
     "mlx-audio>=0.4.0",
 ]
+macos-native = [
+    "pyobjc-framework-EventKit>=10",
+]
 audio = [
     "numpy>=1.26,<3",
     "pynput>=1.7,<2",

@@ -25,6 +25,21 @@ class CapabilityBrokerTests(unittest.TestCase):
         capability = broker.authorize("files.delete", confirmed=True)
         self.assertEqual(capability.tool_name, "files.delete")
 
+    def test_lists_enabled_capabilities_for_scope(self):
+        broker = CapabilityBroker(
+            [
+                Capability("browser.search", enabled=True),
+                Capability("files.read", enabled=True, scope="project"),
+                Capability("files.move", enabled=False, scope="project"),
+            ]
+        )
+
+        global_tools = {cap.tool_name for cap in broker.list_enabled()}
+        project_tools = {cap.tool_name for cap in broker.list_enabled(scope="project")}
+
+        self.assertEqual(global_tools, {"browser.search"})
+        self.assertEqual(project_tools, {"browser.search", "files.read"})
+
 
 if __name__ == "__main__":
     unittest.main()

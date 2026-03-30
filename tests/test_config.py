@@ -1,13 +1,26 @@
 import unittest
+from typing import Any, cast
 
 from jarvis.config import JarvisConfig
 
 
 class JarvisConfigTests(unittest.TestCase):
+    def test_defaults_follow_canonical_local_runtime(self):
+        config = JarvisConfig()
+
+        self.assertEqual(config.activation_backend, "push_to_talk")
+        self.assertEqual(config.stt_backend, "speech_analyzer")
+        self.assertEqual(config.llm_hot_path, "foundation_models")
+        self.assertEqual(config.llm_deliberative, "mlx_lm")
+        self.assertEqual(config.tts_backend, "mlx_audio_kokoro")
+        self.assertEqual(config.tts_model, "mlx-community/Kokoro-82M-bf16")
+        self.assertEqual(config.tts_voice, "pm_santa")
+        self.assertEqual(config.tts_lang_code, "p")
+
     def test_string_lists_are_parsed_from_csv(self):
         config = JarvisConfig(
-            allowed_file_roots="/tmp,/var/tmp",
-            system_allowed_apps="Safari, Notes ,Terminal",
+            allowed_file_roots=cast(Any, "/tmp,/var/tmp"),
+            system_allowed_apps=cast(Any, "Safari, Notes ,Terminal"),
         )
 
         self.assertEqual(config.allowed_file_roots, ["/tmp", "/var/tmp"])

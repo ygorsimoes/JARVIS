@@ -163,7 +163,7 @@ class JarvisRuntime:
             )
         )
         tool_registry = build_default_registry(config)
-        capability_broker = CapabilityBroker(cls._default_capabilities())
+        capability_broker = CapabilityBroker(cls._default_capabilities(config))
         action_broker = ActionBroker(capability_broker, tool_registry)
         adapters = build_runtime_adapters(
             config, enable_native_backends=enable_native_backends
@@ -505,7 +505,7 @@ class JarvisRuntime:
             sentence_streamer.pump(
                 adapter.chat_stream(
                     messages=messages,
-                    tools=self.tool_registry.describe(),
+                    tools=self.action_broker.describe_available_tools(),
                     max_kv_size=self.config.llm_max_kv_size,
                     tool_invoker=self._invoke_llm_tool,
                 ),
@@ -927,16 +927,42 @@ class JarvisRuntime:
         return enriched
 
     @staticmethod
-    def _default_capabilities() -> list:
+    def _default_capabilities(config: JarvisConfig) -> list:
+        files_enabled = bool(config.allowed_file_roots)
         return [
             Capability("system.get_time", enabled=True, risk_level=RiskLevel.READ_ONLY),
             Capability(
                 "system.open_app", enabled=True, risk_level=RiskLevel.WRITE_SAFE
             ),
+            Capability(
+                "system.set_volume",
+                enabled=False,
+                risk_level=RiskLevel.WRITE_SAFE,
+                requires_confirmation=True,
+                side_effects=["system_volume"],
+            ),
             Capability("timer.start", enabled=True, risk_level=RiskLevel.WRITE_SAFE),
             Capability("timer.list", enabled=True, risk_level=RiskLevel.READ_ONLY),
             Capability("timer.cancel", enabled=True, risk_level=RiskLevel.WRITE_SAFE),
             Capability("browser.search", enabled=True, risk_level=RiskLevel.READ_ONLY),
-            Capability("files.list", enabled=True, risk_level=RiskLevel.READ_ONLY),
-            Capability("files.read", enabled=True, risk_level=RiskLevel.READ_ONLY),
+            Capability(
+                "browser.fetch_url", enabled=True, risk_level=RiskLevel.READ_ONLY
+            ),
+            Capability(
+                "files.list", enabled=files_enabled, risk_level=RiskLevel.READ_ONLY
+            ),
+            Capability(
+                "files.read", enabled=files_enabled, risk_level=RiskLevel.READ_ONLY
+            ),
+            Capability(
+                "files.move",
+                enabled=False,
+                risk_level=RiskLevel.WRITE_SAFE,
+                requires_confirmation=True,
+                side_effects=["filesystem_write"],
+            ),
+            Capability(
+                "calendar.list_events", enabled=True, risk_level=RiskLevel.READ_ONLY
+            ),
+            Capability("shell.execute", enabled=False, risk_level=RiskLevel.WRITE_SAFE),
         ]

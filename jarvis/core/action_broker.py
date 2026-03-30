@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .capability_broker import CapabilityBroker, CapabilityDeniedError, ConfirmationRequiredError
+from .capability_broker import (
+    CapabilityBroker,
+    CapabilityDeniedError,
+    ConfirmationRequiredError,
+)
 from ..models.actions import ToolAction
 from ..tools import ToolRegistry
 
@@ -43,9 +47,16 @@ class ActionResult:
 
 
 class ActionBroker:
-    def __init__(self, capability_broker: CapabilityBroker, tool_registry: ToolRegistry) -> None:
+    def __init__(
+        self, capability_broker: CapabilityBroker, tool_registry: ToolRegistry
+    ) -> None:
         self._capability_broker = capability_broker
         self._tool_registry = tool_registry
+
+    def describe_available_tools(self, scope: str = "global") -> list[dict[str, Any]]:
+        return self._tool_registry.describe(
+            allowed_names=self._capability_broker.enabled_tool_names(scope=scope)
+        )
 
     async def execute(self, request: ActionRequest) -> ActionResult:
         self._capability_broker.authorize(
@@ -53,7 +64,9 @@ class ActionBroker:
             scope=request.scope,
             confirmed=request.confirmed,
         )
-        output = await self._tool_registry.execute(request.tool_name, **request.arguments)
+        output = await self._tool_registry.execute(
+            request.tool_name, **request.arguments
+        )
         return ActionResult(tool_name=request.tool_name, output=output)
 
 

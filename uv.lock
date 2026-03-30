@@ -622,6 +622,9 @@ macos-ml = [
     { name = "mlx-audio" },
     { name = "mlx-lm" },
 ]
+macos-native = [
+    { name = "pyobjc-framework-eventkit" },
+]
 memory = [
     { name = "sentence-transformers" },
     { name = "sqlite-vec" },
@@ -645,11 +648,12 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pydantic-settings", specifier = ">=2.2,<3" },
     { name = "pynput", marker = "extra == 'audio'", specifier = ">=1.7,<2" },
+    { name = "pyobjc-framework-eventkit", marker = "extra == 'macos-native'", specifier = ">=10" },
     { name = "sentence-transformers", marker = "extra == 'memory'", specifier = ">=2.6" },
     { name = "sounddevice", marker = "extra == 'audio'", specifier = ">=0.4,<1" },
     { name = "sqlite-vec", marker = "extra == 'memory'", specifier = "==0.1.3" },
 ]
-provides-extras = ["macos-ml", "audio", "memory", "cloud", "http"]
+provides-extras = ["macos-ml", "macos-native", "audio", "memory", "cloud", "http"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1566,6 +1570,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/5d/85e059349e9cfbd57269a1f11f56747b3ff5799a3bcbd95485f363c623d8/pyobjc_framework_coretext-12.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:14100d1e39efb30f57869671fb6fce8d668f80c82e25e7930fb364866e5c0dab", size = 30697, upload-time = "2025-11-14T09:47:10.932Z" },
     { url = "https://files.pythonhosted.org/packages/ef/c3/adf9d306e9ead108167ab7a974ab7d171dbacf31c72fad63e12585f58023/pyobjc_framework_coretext-12.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:782a1a9617ea267c05226e9cd81a8dec529969a607fe1e037541ee1feb9524e9", size = 30095, upload-time = "2025-11-14T09:47:13.893Z" },
     { url = "https://files.pythonhosted.org/packages/bd/ca/6321295f47a47b0fca7de7e751ddc0ddc360413f4e506335fe9b0f0fb085/pyobjc_framework_coretext-12.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:7afe379c5a870fa3e66e6f65231c3c1732d9ccd2cd2a4904b2cd5178c9e3c562", size = 30702, upload-time = "2025-11-14T09:47:17.292Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-eventkit"
+version = "12.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/42/4ec97e641fdcf30896fe76476181622954cb017117b1429f634d24816711/pyobjc_framework_eventkit-12.1.tar.gz", hash = "sha256:7c1882be2f444b1d0f71e9a0cd1e9c04ad98e0261292ab741fc9de0b8bbbbae9", size = 28538, upload-time = "2025-11-14T10:15:07.878Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/35/142f43227627d6324993869d354b9e57eb1e88c4e229e2271592254daf25/pyobjc_framework_eventkit-12.1-py2.py3-none-any.whl", hash = "sha256:3d2d36d5bd9e0a13887a6ac7cdd36675985ebe2a9cb3cdf8cec0725670c92c60", size = 6820, upload-time = "2025-11-14T09:48:14.035Z" },
 ]
 
 [[package]]

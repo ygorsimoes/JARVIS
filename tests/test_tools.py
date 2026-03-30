@@ -1,8 +1,9 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from jarvis.config import JarvisConfig
 from jarvis.tools import ToolRegistry, ToolValidationError, build_default_registry
+from jarvis.tools.shell import ShellTool
 from jarvis.tools.system import SystemTool, ToolExecutionError
 
 
@@ -66,6 +67,33 @@ class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
         registry = build_default_registry(JarvisConfig(system_allowed_apps=["Safari"]))
         with self.assertRaises(ToolValidationError):
             await registry.execute("system.get_time", unexpected=True)
+
+    async def test_system_tool_denies_all_when_allowlist_is_empty(self):
+        tool = SystemTool(allowed_apps=[])
+        with self.assertRaises(ToolExecutionError):
+            await tool.open_app("Safari")
+
+    async def test_shell_tool_uses_exec_and_blocks_shell_operators(self):
+        tool = ShellTool(allowed_commands=["pwd"])
+        process = AsyncMock()
+        process.communicate.return_value = (b"/tmp\n", b"")
+        process.returncode = 0
+
+        with patch(
+            "jarvis.tools.shell.asyncio.create_subprocess_exec", return_value=process
+        ) as spawn:
+            result = await tool.execute("pwd")
+
+        spawn.assert_awaited_once_with(
+            "pwd",
+            stdout=ANY,
+            stderr=ANY,
+        )
+        self.assertEqual(result["status"], "success")
+
+        blocked = await tool.execute("pwd; whoami")
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("Operadores de shell", blocked["error"])
 
 
 if __name__ == "__main__":
