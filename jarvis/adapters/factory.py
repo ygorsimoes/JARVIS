@@ -14,23 +14,39 @@ from .vad import SpeechDetectorAdapter
 @dataclass
 class RuntimeAdapters:
     activation: object
+    activation_backend_name: str
     hot_path_llm: object
+    hot_path_backend_name: str
     deliberative_llm: object
+    deliberative_backend_name: str
     stt: object
+    stt_backend_name: str
     tts: object
+    tts_backend_name: str
     vad: object
+    vad_backend_name: str
     playback: object
+    playback_backend_name: str
 
 
-def build_runtime_adapters(config: JarvisConfig, enable_native_backends: bool = False) -> RuntimeAdapters:
+def build_runtime_adapters(
+    config: JarvisConfig, enable_native_backends: bool = False
+) -> RuntimeAdapters:
     activation = PushToTalkActivationAdapter()
+    activation_backend_name = config.activation_backend
     stt = SpeechAnalyzerSTTAdapter(config.stt_bridge_bin, locale=config.stt_locale)
+    stt_backend_name = config.stt_backend
     vad = SpeechDetectorAdapter()
+    vad_backend_name = "speech_detector"
     tts = NoOpTTSAdapter()
+    tts_backend_name = "noop"
     playback = NoOpPlaybackBackend()
+    playback_backend_name = "noop"
 
     hot_path_llm = FakeLLMAdapter(mode="hot_path")
+    hot_path_backend_name = "fake"
     deliberative_llm = FakeLLMAdapter(mode="deliberative")
+    deliberative_backend_name = "fake"
 
     if enable_native_backends and config.llm_hot_path == "foundation_models":
         hot_path_llm = FoundationModelsBridgeAdapter(
@@ -38,16 +54,20 @@ def build_runtime_adapters(config: JarvisConfig, enable_native_backends: bool = 
             instructions=config.system_prompt,
             bridge_binary_path=config.llm_hot_path_bridge_bin,
         )
+        hot_path_backend_name = "foundation_models"
     elif config.llm_hot_path == "fake":
         hot_path_llm = FakeLLMAdapter(mode="hot_path")
+        hot_path_backend_name = "fake"
 
     if enable_native_backends and config.llm_deliberative == "mlx_lm":
         deliberative_llm = MLXLMAdapter(
             model_repo=config.llm_deliberative_model,
             max_tokens=config.llm_response_max_tokens,
         )
+        deliberative_backend_name = "mlx_lm"
     elif config.llm_deliberative == "fake":
         deliberative_llm = FakeLLMAdapter(mode="deliberative")
+        deliberative_backend_name = "fake"
 
     if enable_native_backends and config.tts_backend == "mlx_audio_kokoro":
         tts = MLXAudioKokoroAdapter(
@@ -55,20 +75,31 @@ def build_runtime_adapters(config: JarvisConfig, enable_native_backends: bool = 
             voice=config.tts_voice,
             lang_code=config.tts_lang_code,
         )
+        tts_backend_name = "mlx_audio_kokoro"
     elif config.tts_backend == "noop":
         tts = NoOpTTSAdapter()
+        tts_backend_name = "noop"
 
     if enable_native_backends and config.playback_backend == "sounddevice":
         playback = SoundDevicePlaybackBackend()
+        playback_backend_name = "sounddevice"
     elif config.playback_backend == "noop":
         playback = NoOpPlaybackBackend()
+        playback_backend_name = "noop"
 
     return RuntimeAdapters(
         activation=activation,
+        activation_backend_name=activation_backend_name,
         hot_path_llm=hot_path_llm,
+        hot_path_backend_name=hot_path_backend_name,
         deliberative_llm=deliberative_llm,
+        deliberative_backend_name=deliberative_backend_name,
         stt=stt,
+        stt_backend_name=stt_backend_name,
         tts=tts,
+        tts_backend_name=tts_backend_name,
         vad=vad,
+        vad_backend_name=vad_backend_name,
         playback=playback,
+        playback_backend_name=playback_backend_name,
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import uuid
 from typing import AsyncIterator, Iterable, List, Optional
 
 from .adapters import build_runtime_adapters
@@ -11,6 +12,7 @@ from .core.action_broker import ActionBroker, ActionRequest
 from .core.capability_broker import Capability, CapabilityBroker, RiskLevel
 from .core.complexity_router import ComplexityRouter
 from .core.dialogue_manager import DialogueManager
+from .core.policy_engine import PolicyEngine
 from .core.resource_governor import ResourceGovernor
 from .core.sentence_streamer import SentenceStreamer, SentenceStreamerConfig
 from .core.speech_pipeline import SpeechPipeline
@@ -47,6 +49,7 @@ class JarvisTurnChunk:
 
 @dataclass
 class CapturedVoiceTurn:
+    turn_id: str
     text: str
     reason: str
     used_partial: bool
@@ -57,8 +60,11 @@ class CapturedVoiceTurn:
 class ActiveTurnExecution:
     response_task: asyncio.Task
     mode: str
+    turn_id: str
     adapter: object | None = None
     speech_pipeline: SpeechPipeline | None = None
+    route: RouteDecision | None = None
+    backend_name: str | None = None
     interrupted: bool = False
 
 
@@ -71,9 +77,17 @@ class JarvisRuntime:
         dialogue_manager: DialogueManager,
         sentence_streamer: SentenceStreamer,
         router: ComplexityRouter,
+        policy_engine: PolicyEngine,
         action_broker: ActionBroker,
         tool_registry: ToolRegistry,
         turn_manager_config: TurnManagerConfig,
+        activation_backend_name: str,
+        hot_path_backend_name: str,
+        deliberative_backend_name: str,
+        stt_backend_name: str,
+        tts_backend_name: str,
+        vad_backend_name: str,
+        playback_backend_name: str,
         activation_adapter,
         hot_path_adapter,
         deliberative_adapter,
@@ -83,14 +97,23 @@ class JarvisRuntime:
         playback_backend,
     ) -> None:
         self.config = config
+        self.session_id = str(uuid.uuid4())
         self.event_bus = event_bus
         self.state_machine = state_machine
         self.dialogue_manager = dialogue_manager
         self.sentence_streamer = sentence_streamer
         self.router = router
+        self.policy_engine = policy_engine
         self.action_broker = action_broker
         self.tool_registry = tool_registry
         self.turn_manager_config = turn_manager_config
+        self.activation_backend_name = activation_backend_name
+        self.hot_path_backend_name = hot_path_backend_name
+        self.deliberative_backend_name = deliberative_backend_name
+        self.stt_backend_name = stt_backend_name
+        self.tts_backend_name = tts_backend_name
+        self.vad_backend_name = vad_backend_name
+        self.playback_backend_name = playback_backend_name
         self.activation_adapter = activation_adapter
         self.hot_path_adapter = hot_path_adapter
         self.deliberative_adapter = deliberative_adapter
@@ -108,7 +131,10 @@ class JarvisRuntime:
         enable_native_backends: bool = False,
     ) -> "JarvisRuntime":
         config = config or JarvisConfig()
-        if enable_native_backends:
+        policy_engine = PolicyEngine(
+            config, enable_native_backends=enable_native_backends
+        )
+        if policy_engine.requires_resource_governor():
             ResourceGovernor(config).apply()
         event_bus = EventBus(config.event_bus_queue_size)
         state_machine = StateMachine(event_bus=event_bus)
@@ -145,9 +171,17 @@ class JarvisRuntime:
             dialogue_manager=dialogue_manager,
             sentence_streamer=sentence_streamer,
             router=ComplexityRouter(),
+            policy_engine=policy_engine,
             action_broker=action_broker,
             tool_registry=tool_registry,
             turn_manager_config=turn_manager_config,
+            activation_backend_name=adapters.activation_backend_name,
+            hot_path_backend_name=adapters.hot_path_backend_name,
+            deliberative_backend_name=adapters.deliberative_backend_name,
+            stt_backend_name=adapters.stt_backend_name,
+            tts_backend_name=adapters.tts_backend_name,
+            vad_backend_name=adapters.vad_backend_name,
+            playback_backend_name=adapters.playback_backend_name,
             activation_adapter=adapters.activation,
             hot_path_adapter=adapters.hot_path_llm,
             deliberative_adapter=adapters.deliberative_llm,
@@ -164,11 +198,11 @@ class JarvisRuntime:
             if not activated:
                 continue
 
-            await self.event_bus.publish(
-                Event(
-                    event_type=EventType.ACTIVATION_TRIGGERED,
-                    payload={"source": "foreground"},
-                )
+            await self._publish_event(
+                EventType.ACTIVATION_TRIGGERED,
+                {"source": "foreground"},
+                mode="voice",
+                backend=self.activation_backend_name,
             )
 
             voice_turn = await self.capture_voice_turn()
@@ -184,7 +218,10 @@ class JarvisRuntime:
             response_queue: asyncio.Queue = asyncio.Queue()
             response_task = asyncio.create_task(
                 self._pump_turn_chunks_to_queue(
-                    self.stream_transcribed_turn(voice_turn.text),
+                    self.stream_transcribed_turn(
+                        voice_turn.text,
+                        turn_id=voice_turn.turn_id,
+                    ),
                     response_queue,
                 ),
                 name="jarvis-voice-response",
@@ -211,6 +248,7 @@ class JarvisRuntime:
             handled_turns += 1
 
     async def capture_voice_turn(self) -> CapturedVoiceTurn:
+        turn_id = str(uuid.uuid4())
         turn_manager = TurnManager(self.turn_manager_config)
         await self.state_machine.transition(JarvisState.ARMED, "activation accepted")
         await self.state_machine.transition(
@@ -234,21 +272,22 @@ class JarvisRuntime:
                     completed_turn = turn_manager.finalize(reason="speech_stream_ended")
                     break
 
-                await self._publish_stt_event(event)
+                await self._publish_stt_event(event, turn_id=turn_id)
                 completed_turn = self._consume_turn_signal(turn_manager, event)
 
             if completed_turn is None or not completed_turn.text:
                 raise RuntimeError("voice turn ended without a usable transcript")
 
-            await self.event_bus.publish(
-                Event(
-                    event_type=EventType.TURN_READY,
-                    payload={
-                        "text": completed_turn.text,
-                        "reason": completed_turn.reason,
-                        "used_partial": completed_turn.used_partial,
-                    },
-                )
+            await self._publish_event(
+                EventType.TURN_READY,
+                {
+                    "text": completed_turn.text,
+                    "reason": completed_turn.reason,
+                    "used_partial": completed_turn.used_partial,
+                },
+                turn_id=turn_id,
+                mode="voice",
+                backend=self.stt_backend_name,
             )
             await self.state_machine.transition(
                 JarvisState.TRANSCRIBING,
@@ -256,6 +295,7 @@ class JarvisRuntime:
                 {"used_partial": completed_turn.used_partial},
             )
             return CapturedVoiceTurn(
+                turn_id=turn_id,
                 text=completed_turn.text,
                 reason=completed_turn.reason,
                 used_partial=completed_turn.used_partial,
@@ -271,8 +311,11 @@ class JarvisRuntime:
         self,
         text: str,
         recalled_memories: Optional[Iterable[Memory]] = None,
+        turn_id: Optional[str] = None,
     ) -> AsyncIterator[JarvisTurnChunk]:
-        execution = self._bind_active_turn(mode="voice")
+        execution = self._bind_active_turn(
+            mode="voice", turn_id=turn_id or str(uuid.uuid4())
+        )
         try:
             await self.state_machine.transition(
                 JarvisState.THINKING, "transcript ready"
@@ -298,9 +341,10 @@ class JarvisRuntime:
         recalled_memories: Optional[Iterable[Memory]] = None,
     ) -> AsyncIterator[JarvisTurnChunk]:
         recalled_memories = list(recalled_memories or [])
+        turn_id = str(uuid.uuid4())
         route: Optional[RouteDecision] = None
         response_sentences: List[str] = []
-        execution = self._bind_active_turn(mode="text")
+        execution = self._bind_active_turn(mode="text", turn_id=turn_id)
 
         try:
             await self.state_machine.transition(JarvisState.ARMED, "text turn received")
@@ -375,10 +419,9 @@ class JarvisRuntime:
             return True
 
         execution.interrupted = True
-        await self.event_bus.publish(
-            Event(
-                event_type=EventType.INTERRUPTION_REQUESTED, payload={"reason": reason}
-            )
+        await self._publish_event(
+            EventType.INTERRUPTION_REQUESTED,
+            {"reason": reason},
         )
         await self.state_machine.force_transition(JarvisState.INTERRUPTED, reason)
 
@@ -435,22 +478,49 @@ class JarvisRuntime:
             recent_turns=len(self.dialogue_manager.working_memory),
         )
 
-        self.dialogue_manager.record_turn(
-            Role.USER, text, {"route": route.target.value}
-        )
-        await self.event_bus.publish(
-            Event(event_type=EventType.USER_TURN, payload={"text": text})
-        )
-        await self.event_bus.publish(
-            Event(
-                event_type=EventType.ROUTE_SELECTED,
-                payload={
-                    "input_text": text,
-                    "target": route.target.value,
-                    "tool_name": route.tool_name,
-                    "reason": route.reason,
-                },
+        llm_plan = None
+        backend_name = route.tool_name
+        messages = None
+        if route.target != RouteTarget.DIRECT_TOOL:
+            llm_plan = self.policy_engine.select_llm(
+                route=route,
+                hot_path_adapter=self.hot_path_adapter,
+                hot_path_backend_name=self.hot_path_backend_name,
+                deliberative_adapter=self.deliberative_adapter,
+                deliberative_backend_name=self.deliberative_backend_name,
             )
+            backend_name = llm_plan.backend_name
+            messages = self.dialogue_manager.compose_messages(text, recalled_memories)
+
+        self._set_active_turn_context(route=route, backend_name=backend_name)
+
+        self.dialogue_manager.record_turn(
+            Role.USER,
+            text,
+            {"route": route.target.value, "backend": backend_name},
+        )
+        await self._publish_event(
+            EventType.USER_TURN,
+            {"text": text},
+            route=route,
+            backend=backend_name,
+        )
+        await self._publish_event(
+            EventType.ROUTE_SELECTED,
+            {
+                "input_text": text,
+                "target": route.target.value,
+                "tool_name": route.tool_name,
+                "reason": route.reason,
+                "effective_target": (
+                    llm_plan.effective_target.value
+                    if llm_plan is not None
+                    else route.target.value
+                ),
+                "policy_reason": llm_plan.reason if llm_plan is not None else None,
+            },
+            route=route,
+            backend=backend_name,
         )
 
         response_sentences: List[str] = []
@@ -463,24 +533,17 @@ class JarvisRuntime:
             await self.state_machine.transition(
                 JarvisState.SPEAKING, "tool response ready"
             )
-            await self.event_bus.publish(
-                Event(
-                    event_type=EventType.ASSISTANT_SENTENCE,
-                    payload={
-                        "sentence": sentence,
-                        "route": route.target.value,
-                        "index": 0,
-                    },
-                )
+            await self._publish_event(
+                EventType.ASSISTANT_SENTENCE,
+                {"sentence": sentence, "index": 0},
+                route=route,
+                backend=backend_name,
             )
             yield JarvisTurnChunk(sentence=sentence, route=route, index=0)
         else:
-            messages = self.dialogue_manager.compose_messages(text, recalled_memories)
-            adapter = (
-                self.hot_path_adapter
-                if route.target == RouteTarget.HOT_PATH
-                else self.deliberative_adapter
-            )
+            assert llm_plan is not None
+            assert messages is not None
+            adapter = llm_plan.adapter
             if self._active_turn is not None:
                 self._active_turn.adapter = adapter
             speaking_started = False
@@ -492,15 +555,11 @@ class JarvisRuntime:
                     )
                     speaking_started = True
                 response_sentences.append(sentence)
-                await self.event_bus.publish(
-                    Event(
-                        event_type=EventType.ASSISTANT_SENTENCE,
-                        payload={
-                            "sentence": sentence,
-                            "route": route.target.value,
-                            "index": index,
-                        },
-                    )
+                await self._publish_event(
+                    EventType.ASSISTANT_SENTENCE,
+                    {"sentence": sentence, "index": index},
+                    route=route,
+                    backend=backend_name,
                 )
                 yield JarvisTurnChunk(sentence=sentence, route=route, index=index)
                 index += 1
@@ -509,17 +568,21 @@ class JarvisRuntime:
             sentence.strip() for sentence in response_sentences
         ).strip()
         self.dialogue_manager.record_turn(
-            Role.ASSISTANT, full_text, {"route": route.target.value}
+            Role.ASSISTANT,
+            full_text,
+            {"route": route.target.value, "backend": backend_name},
         )
-        await self.event_bus.publish(
-            Event(
-                event_type=EventType.ASSISTANT_COMPLETED,
-                payload={"text": full_text, "route": route.target.value},
-            )
+        await self._publish_event(
+            EventType.ASSISTANT_COMPLETED,
+            {"text": full_text},
+            route=route,
+            backend=backend_name,
         )
         await self.state_machine.transition(JarvisState.IDLE, "turn completed")
 
-    async def _publish_stt_event(self, event: dict) -> None:
+    async def _publish_stt_event(
+        self, event: dict, turn_id: Optional[str] = None
+    ) -> None:
         event_type = event.get("type")
         if event_type == "speech_started":
             mapped = EventType.SPEECH_STARTED
@@ -532,7 +595,13 @@ class JarvisRuntime:
         else:
             return
 
-        await self.event_bus.publish(Event(event_type=mapped, payload=dict(event)))
+        await self._publish_event(
+            mapped,
+            dict(event),
+            turn_id=turn_id,
+            mode="voice",
+            backend=self.stt_backend_name,
+        )
 
     def _consume_turn_signal(
         self, turn_manager: TurnManager, event: dict
@@ -565,15 +634,13 @@ class JarvisRuntime:
         input_text: Optional[str],
         route: Optional[RouteDecision] = None,
     ) -> None:
-        await self.event_bus.publish(
-            Event(
-                event_type=EventType.ERROR,
-                payload={
-                    "message": str(exc),
-                    "route": route.target.value if route else None,
-                    "input_text": input_text,
-                },
-            )
+        await self._publish_event(
+            EventType.ERROR,
+            {
+                "message": str(exc),
+                "input_text": input_text,
+            },
+            route=route,
         )
         await self.state_machine.force_transition(
             JarvisState.FAILED, "turn failed", {"message": str(exc)}
@@ -600,13 +667,14 @@ class JarvisRuntime:
         finally:
             await queue.put(None)
 
-    def _bind_active_turn(self, mode: str) -> ActiveTurnExecution:
+    def _bind_active_turn(self, mode: str, turn_id: str) -> ActiveTurnExecution:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("active turn requires a running asyncio task")
         execution = ActiveTurnExecution(
             response_task=task,
             mode=mode,
+            turn_id=turn_id,
             speech_pipeline=self._pending_voice_pipeline if mode == "voice" else None,
         )
         self._active_turn = execution
@@ -620,11 +688,9 @@ class JarvisRuntime:
         action = self._build_direct_action(text, route)
         request = ActionRequest.from_action(action)
         result = await self.action_broker.execute(request)
-        await self.event_bus.publish(
-            Event(
-                event_type=EventType.TOOL_EXECUTED,
-                payload={"tool_name": result.tool_name, "output": result.output},
-            )
+        await self._publish_event(
+            EventType.TOOL_EXECUTED,
+            {"tool_name": result.tool_name, "output": result.output},
         )
         return self._format_tool_output(result.tool_name, result.output)
 
@@ -645,11 +711,9 @@ class JarvisRuntime:
             result = await self.action_broker.execute(
                 ActionRequest(tool_name=tool_name, arguments=arguments)
             )
-            await self.event_bus.publish(
-                Event(
-                    event_type=EventType.TOOL_EXECUTED,
-                    payload={"tool_name": result.tool_name, "output": result.output},
-                )
+            await self._publish_event(
+                EventType.TOOL_EXECUTED,
+                {"tool_name": result.tool_name, "output": result.output},
             )
             return result.output
         finally:
@@ -712,6 +776,83 @@ class JarvisRuntime:
         if tool_name == "system.open_app":
             return "%s aberto." % output["app_name"]
         return str(output)
+
+    def _set_active_turn_context(
+        self, route: RouteDecision, backend_name: Optional[str]
+    ) -> None:
+        if self._active_turn is None:
+            return
+        self._active_turn.route = route
+        self._active_turn.backend_name = backend_name
+
+    async def _publish_event(
+        self,
+        event_type: EventType,
+        payload: Optional[dict] = None,
+        *,
+        turn_id: Optional[str] = None,
+        route: Optional[RouteDecision] = None,
+        backend: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> None:
+        await self.event_bus.publish(
+            Event(
+                event_type=event_type,
+                payload=self._build_event_payload(
+                    payload=payload,
+                    turn_id=turn_id,
+                    route=route,
+                    backend=backend,
+                    mode=mode,
+                ),
+            )
+        )
+
+    def _build_event_payload(
+        self,
+        payload: Optional[dict] = None,
+        *,
+        turn_id: Optional[str] = None,
+        route: Optional[RouteDecision] = None,
+        backend: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> dict:
+        active_turn = self._active_turn
+        resolved_route = route or (
+            active_turn.route if active_turn is not None else None
+        )
+        resolved_backend = (
+            backend
+            if backend is not None
+            else (active_turn.backend_name if active_turn is not None else None)
+        )
+        resolved_turn_id = (
+            turn_id
+            if turn_id is not None
+            else (active_turn.turn_id if active_turn is not None else None)
+        )
+        resolved_mode = (
+            mode
+            if mode is not None
+            else (active_turn.mode if active_turn is not None else None)
+        )
+
+        enriched = {"session_id": self.session_id}
+        if resolved_turn_id is not None:
+            enriched["turn_id"] = resolved_turn_id
+        if resolved_mode is not None:
+            enriched["mode"] = resolved_mode
+        if resolved_route is not None:
+            enriched["route"] = resolved_route.target.value
+            enriched["route_reason"] = resolved_route.reason
+            enriched["route_confidence"] = resolved_route.confidence
+            if resolved_route.tool_name is not None:
+                enriched["tool_name"] = resolved_route.tool_name
+        if resolved_backend is not None:
+            enriched["backend"] = resolved_backend
+        if payload:
+            enriched.update(payload)
+        return enriched
 
     @staticmethod
     def _default_capabilities() -> list:

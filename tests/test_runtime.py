@@ -3,7 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from jarvis.config import JarvisConfig
-from jarvis.models.conversation import RouteTarget
+from jarvis.models.conversation import Role, RouteTarget
+from jarvis.models.events import EventType
 from jarvis.models.state import JarvisState
 from jarvis.runtime import JarvisRuntime
 
@@ -77,6 +78,19 @@ class ToolCallingHotPathAdapter:
         assert tool_invoker is not None
         result = await tool_invoker("system.get_time", {})
         yield "Agora sao %s. Posso seguir." % result["time"]
+
+    async def cancel_current_response(self) -> bool:
+        return False
+
+
+class CapturingHotPathAdapter:
+    def __init__(self):
+        self.messages = None
+
+    async def chat_stream(self, messages, tools, max_kv_size, tool_invoker=None):
+        del tools, max_kv_size, tool_invoker
+        self.messages = list(messages)
+        yield "Resposta curta."
 
     async def cancel_current_response(self) -> bool:
         return False
@@ -194,6 +208,43 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.route.target, RouteTarget.HOT_PATH)
         self.assertIn("Agora sao", response.full_text)
         self.assertEqual(self.runtime.state_machine.state, JarvisState.IDLE)
+
+    async def test_current_user_turn_is_not_duplicated_in_prompt_context(self):
+        self.runtime.hot_path_adapter = CapturingHotPathAdapter()
+
+        await self.runtime.respond_text("Me lembra do resumo")
+
+        user_messages = [
+            message.content
+            for message in (self.runtime.hot_path_adapter.messages or [])
+            if message.role == Role.USER
+        ]
+        self.assertEqual(user_messages, ["Me lembra do resumo"])
+
+    async def test_runtime_events_include_session_turn_and_backend_metadata(self):
+        subscription = await self.runtime.event_bus.subscribe(
+            [EventType.ROUTE_SELECTED, EventType.ASSISTANT_COMPLETED]
+        )
+
+        await self.runtime.respond_text("Que horas sao agora?")
+
+        route_event = await subscription.get()
+        completed_event = await subscription.get()
+
+        self.assertEqual(route_event.event_type, EventType.ROUTE_SELECTED)
+        self.assertEqual(completed_event.event_type, EventType.ASSISTANT_COMPLETED)
+        self.assertIn("session_id", route_event.payload)
+        self.assertEqual(
+            route_event.payload["session_id"], completed_event.payload["session_id"]
+        )
+        self.assertIn("turn_id", route_event.payload)
+        self.assertEqual(
+            route_event.payload["turn_id"], completed_event.payload["turn_id"]
+        )
+        self.assertEqual(route_event.payload["mode"], "text")
+        self.assertEqual(route_event.payload["backend"], "system.get_time")
+        self.assertEqual(completed_event.payload["backend"], "system.get_time")
+        self.assertEqual(route_event.payload["route"], RouteTarget.DIRECT_TOOL.value)
 
 
 if __name__ == "__main__":
