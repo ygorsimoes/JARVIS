@@ -32,10 +32,12 @@ class FakeSTTSession:
 
 class FakeSTTAdapter:
     def __init__(self, events):
-        self.session = FakeSTTSession(events)
+        self.events = events
 
     async def start_live_session(self):
-        return self.session
+        session_events = self.events
+        self.events = []  # O watcher não ver eventos
+        return FakeSTTSession(session_events)
 
 
 class FakePlaybackBackend:

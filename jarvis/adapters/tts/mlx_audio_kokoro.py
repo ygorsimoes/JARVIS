@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import AsyncIterator
 
 
@@ -10,14 +11,22 @@ class MLXAudioKokoroAdapter:
         self.voice = voice
         self.lang_code = lang_code
         self._model = None
+        self._cancel_event = threading.Event()
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
+        self._cancel_event.clear()
         model = await asyncio.to_thread(self._ensure_model)
         for result in model.generate(text, voice=self.voice, lang_code=self.lang_code):
+            if self._cancel_event.is_set():
+                break
             audio = getattr(result, "audio", None)
             if audio is None:
                 continue
             yield audio.tobytes()
+
+    async def cancel_current_synthesis(self) -> bool:
+        self._cancel_event.set()
+        return True
 
     async def shutdown(self) -> None:
         await asyncio.sleep(0)

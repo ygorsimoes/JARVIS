@@ -239,6 +239,10 @@ class JarvisRuntime:
                 ),
                 name="jarvis-voice-response",
             )
+            barge_in_task = asyncio.create_task(
+                self._barge_in_watcher(response_task, pipeline),
+                name="jarvis-barge-in-watcher",
+            )
             try:
                 while True:
                     item = await response_queue.get()
@@ -257,8 +261,33 @@ class JarvisRuntime:
                         await response_task
                     except asyncio.CancelledError:
                         pass
+                if not barge_in_task.done():
+                    barge_in_task.cancel()
+                    try:
+                        await barge_in_task
+                    except asyncio.CancelledError:
+                        pass
                 await pipeline.shutdown()
             handled_turns += 1
+
+    async def _barge_in_watcher(
+        self,
+        response_task: asyncio.Task,
+        pipeline: SpeechPipeline,
+    ) -> None:
+        """Monitora o VAD em paralelo durante SPEAKING/THINKING.
+        Cancela response_task ao detectar fala."""
+        session = await self.stt_adapter.start_live_session()
+        try:
+            async for event in session.iter_events():
+                if response_task.done():
+                    return
+                classified = self.vad_adapter.classify_event(event)
+                if classified and classified["speech_detected"]:
+                    await self.interrupt_current_turn(reason="barge-in")
+                    return
+        finally:
+            await session.stop()
 
     async def capture_voice_turn(self) -> CapturedVoiceTurn:
         turn_id = str(uuid.uuid4())
