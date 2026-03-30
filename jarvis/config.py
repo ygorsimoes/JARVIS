@@ -47,6 +47,8 @@ class JarvisConfig(BaseSettings):
     llm_deliberative_temperature: float = 0.2
     llm_deliberative_top_p: float = 0.9
     llm_deliberative_repetition_penalty: float = 1.0
+    llm_fallback: str = "anthropic"
+    llm_fallback_model: str = "claude-3-7-sonnet-20250219"
     llm_response_max_tokens: int = 512
 
     tts_backend: str = "mlx_audio_kokoro"

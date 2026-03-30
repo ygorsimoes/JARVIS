@@ -6,6 +6,8 @@ from ..audio import NoOpPlaybackBackend, SoundDevicePlaybackBackend
 from ..config import JarvisConfig
 from .activation import PushToTalkActivationAdapter
 from .llm import FakeLLMAdapter, FoundationModelsBridgeAdapter, MLXLMAdapter
+from .llm.anthropic import AnthropicAdapter
+from .llm.openai import OpenAIAdapter
 from .stt import SpeechAnalyzerSTTAdapter
 from .tts import AVSpeechAdapter, MLXAudioKokoroAdapter, NoOpTTSAdapter
 from .vad import SpeechDetectorAdapter
@@ -19,6 +21,8 @@ class RuntimeAdapters:
     hot_path_backend_name: str
     deliberative_llm: object
     deliberative_backend_name: str
+    fallback_llm: object
+    fallback_backend_name: str
     stt: object
     stt_backend_name: str
     tts: object
@@ -51,6 +55,8 @@ def build_runtime_adapters(
     hot_path_backend_name = "fake"
     deliberative_llm = FakeLLMAdapter(mode="deliberative")
     deliberative_backend_name = "fake"
+    fallback_llm = FakeLLMAdapter(mode="fallback")
+    fallback_backend_name = "fake"
 
     if enable_native_backends and config.llm_hot_path == "foundation_models":
         hot_path_llm = FoundationModelsBridgeAdapter(
@@ -75,6 +81,24 @@ def build_runtime_adapters(
     elif config.llm_deliberative == "fake":
         deliberative_llm = FakeLLMAdapter(mode="deliberative")
         deliberative_backend_name = "fake"
+
+    if enable_native_backends and config.llm_fallback == "anthropic":
+        fallback_llm = AnthropicAdapter(
+            model_name=config.llm_fallback_model,
+            temperature=config.llm_deliberative_temperature,
+            max_tokens=config.llm_response_max_tokens,
+        )
+        fallback_backend_name = "anthropic"
+    elif enable_native_backends and config.llm_fallback == "openai":
+        fallback_llm = OpenAIAdapter(
+            model_name=config.llm_fallback_model,
+            temperature=config.llm_deliberative_temperature,
+            max_tokens=config.llm_response_max_tokens,
+        )
+        fallback_backend_name = "openai"
+    elif config.llm_fallback == "fake":
+        fallback_llm = FakeLLMAdapter(mode="fallback")
+        fallback_backend_name = "fake"
 
     if enable_native_backends and config.tts_backend == "mlx_audio_kokoro":
         tts = MLXAudioKokoroAdapter(
@@ -108,6 +132,8 @@ def build_runtime_adapters(
         hot_path_backend_name=hot_path_backend_name,
         deliberative_llm=deliberative_llm,
         deliberative_backend_name=deliberative_backend_name,
+        fallback_llm=fallback_llm,
+        fallback_backend_name=fallback_backend_name,
         stt=stt,
         stt_backend_name=stt_backend_name,
         tts=tts,

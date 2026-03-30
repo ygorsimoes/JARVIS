@@ -48,39 +48,33 @@ class PolicyEngine:
         hot_path_backend_name: str,
         deliberative_adapter: object,
         deliberative_backend_name: str,
+        fallback_adapter: object,
+        fallback_backend_name: str,
     ) -> LLMExecutionPlan:
         if route.target == RouteTarget.DIRECT_TOOL:
             raise ValueError("direct tool routes do not need an llm execution plan")
 
-        primary, secondary = self._ordered_candidates(
+        candidates = self._ordered_candidates(
             route=route,
             hot_path_adapter=hot_path_adapter,
             hot_path_backend_name=hot_path_backend_name,
             deliberative_adapter=deliberative_adapter,
             deliberative_backend_name=deliberative_backend_name,
+            fallback_adapter=fallback_adapter,
+            fallback_backend_name=fallback_backend_name,
         )
 
-        if await self._candidate_is_available(primary):
-            return LLMExecutionPlan(
-                adapter=primary.adapter,
-                backend_name=primary.backend_name,
-                requested_target=route.target,
-                effective_target=primary.target,
-                reason=self._selection_reason(
-                    route.target, primary, used_fallback=False
-                ),
-            )
-
-        if secondary is not None and await self._candidate_is_available(secondary):
-            return LLMExecutionPlan(
-                adapter=secondary.adapter,
-                backend_name=secondary.backend_name,
-                requested_target=route.target,
-                effective_target=secondary.target,
-                reason=self._selection_reason(
-                    route.target, secondary, used_fallback=True
-                ),
-            )
+        for i, candidate in enumerate(candidates):
+            if await self._candidate_is_available(candidate):
+                return LLMExecutionPlan(
+                    adapter=candidate.adapter,
+                    backend_name=candidate.backend_name,
+                    requested_target=route.target,
+                    effective_target=candidate.target,
+                    reason=self._selection_reason(
+                        route.target, candidate, used_fallback=(i > 0)
+                    ),
+                )
 
         raise RuntimeError(
             "nenhum backend llm local disponivel para %s" % route.target.value
@@ -93,7 +87,9 @@ class PolicyEngine:
         hot_path_backend_name: str,
         deliberative_adapter: object,
         deliberative_backend_name: str,
-    ) -> tuple[_BackendCandidate, _BackendCandidate | None]:
+        fallback_adapter: object,
+        fallback_backend_name: str,
+    ) -> list[_BackendCandidate]:
         hot_candidate = _BackendCandidate(
             adapter=hot_path_adapter,
             backend_name=hot_path_backend_name,
@@ -104,20 +100,24 @@ class PolicyEngine:
             backend_name=deliberative_backend_name,
             target=RouteTarget.DELIBERATIVE,
         )
+        cloud_candidate = _BackendCandidate(
+            adapter=fallback_adapter,
+            backend_name=fallback_backend_name,
+            target=RouteTarget.DELIBERATIVE,
+        )
 
         if route.target == RouteTarget.HOT_PATH:
-            primary = hot_candidate
-            secondary = deliberative_candidate
+            candidates = [hot_candidate, deliberative_candidate, cloud_candidate]
         else:
-            primary = deliberative_candidate
-            secondary = hot_candidate
+            candidates = [deliberative_candidate, hot_candidate, cloud_candidate]
 
         if not self._enable_native_backends:
-            return primary, None
+            return [candidates[0]]
 
-        if primary.backend_name == "fake" and secondary.backend_name != "fake":
-            return secondary, primary
-        return primary, secondary
+        # Mover backends fake para o fim
+        real_candidates = [c for c in candidates if c.backend_name != "fake"]
+        fake_candidates = [c for c in candidates if c.backend_name == "fake"]
+        return real_candidates + fake_candidates
 
     async def _candidate_is_available(self, candidate: _BackendCandidate) -> bool:
         healthcheck = getattr(candidate.adapter, "healthcheck", None)

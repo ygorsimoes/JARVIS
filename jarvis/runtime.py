@@ -89,6 +89,7 @@ class JarvisRuntime:
         activation_backend_name: str,
         hot_path_backend_name: str,
         deliberative_backend_name: str,
+        fallback_backend_name: str,
         stt_backend_name: str,
         tts_backend_name: str,
         vad_backend_name: str,
@@ -96,6 +97,7 @@ class JarvisRuntime:
         activation_adapter,
         hot_path_adapter,
         deliberative_adapter,
+        fallback_adapter,
         stt_adapter,
         tts_adapter,
         vad_adapter,
@@ -116,6 +118,7 @@ class JarvisRuntime:
         self.activation_backend_name = activation_backend_name
         self.hot_path_backend_name = hot_path_backend_name
         self.deliberative_backend_name = deliberative_backend_name
+        self.fallback_backend_name = fallback_backend_name
         self.stt_backend_name = stt_backend_name
         self.tts_backend_name = tts_backend_name
         self.vad_backend_name = vad_backend_name
@@ -123,6 +126,7 @@ class JarvisRuntime:
         self.activation_adapter = activation_adapter
         self.hot_path_adapter = hot_path_adapter
         self.deliberative_adapter = deliberative_adapter
+        self.fallback_adapter = fallback_adapter
         self.stt_adapter = stt_adapter
         self.tts_adapter = tts_adapter
         self.vad_adapter = vad_adapter
@@ -190,6 +194,7 @@ class JarvisRuntime:
             activation_backend_name=adapters.activation_backend_name,
             hot_path_backend_name=adapters.hot_path_backend_name,
             deliberative_backend_name=adapters.deliberative_backend_name,
+            fallback_backend_name=adapters.fallback_backend_name,
             stt_backend_name=adapters.stt_backend_name,
             tts_backend_name=adapters.tts_backend_name,
             vad_backend_name=adapters.vad_backend_name,
@@ -197,6 +202,7 @@ class JarvisRuntime:
             activation_adapter=adapters.activation,
             hot_path_adapter=adapters.hot_path_llm,
             deliberative_adapter=adapters.deliberative_llm,
+            fallback_adapter=adapters.fallback_llm,
             stt_adapter=adapters.stt,
             tts_adapter=adapters.tts,
             vad_adapter=adapters.vad,
@@ -547,6 +553,8 @@ class JarvisRuntime:
                 hot_path_backend_name=self.hot_path_backend_name,
                 deliberative_adapter=self.deliberative_adapter,
                 deliberative_backend_name=self.deliberative_backend_name,
+                fallback_adapter=self.fallback_adapter,
+                fallback_backend_name=self.fallback_backend_name,
             )
             backend_name = llm_plan.backend_name
             messages = self.dialogue_manager.compose_messages(text, recalled_memories)

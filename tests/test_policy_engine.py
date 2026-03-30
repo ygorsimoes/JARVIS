@@ -43,6 +43,8 @@ class PolicyEngineTests(unittest.IsolatedAsyncioTestCase):
             hot_path_backend_name="fake",
             deliberative_adapter=deliberative_adapter,
             deliberative_backend_name="mlx_lm",
+            fallback_adapter=object(),
+            fallback_backend_name="anthropic",
         )
 
         self.assertIs(plan.adapter, deliberative_adapter)
@@ -62,6 +64,8 @@ class PolicyEngineTests(unittest.IsolatedAsyncioTestCase):
             hot_path_backend_name="fake",
             deliberative_adapter=deliberative_adapter,
             deliberative_backend_name="mlx_lm",
+            fallback_adapter=object(),
+            fallback_backend_name="anthropic",
         )
 
         self.assertIs(plan.adapter, hot_path_adapter)
@@ -78,9 +82,28 @@ class PolicyEngineTests(unittest.IsolatedAsyncioTestCase):
             hot_path_backend_name="foundation_models",
             deliberative_adapter=object(),
             deliberative_backend_name="mlx_lm",
+            fallback_adapter=object(),
+            fallback_backend_name="anthropic",
         )
 
         self.assertEqual(plan.backend_name, "mlx_lm")
+        self.assertEqual(plan.effective_target, RouteTarget.DELIBERATIVE)
+
+    async def test_falls_back_to_cloud_when_both_local_healthchecks_fail(self):
+        route = RouteDecision(target=RouteTarget.HOT_PATH, reason="pedido curto")
+        engine = PolicyEngine(JarvisConfig(), enable_native_backends=True)
+
+        plan = await engine.select_llm(
+            route=route,
+            hot_path_adapter=_HealthcheckAdapter(available=False),
+            hot_path_backend_name="foundation_models",
+            deliberative_adapter=_HealthcheckAdapter(available=False),
+            deliberative_backend_name="mlx_lm",
+            fallback_adapter=object(),
+            fallback_backend_name="anthropic",
+        )
+
+        self.assertEqual(plan.backend_name, "anthropic")
         self.assertEqual(plan.effective_target, RouteTarget.DELIBERATIVE)
 
     async def test_raises_when_no_local_backend_is_available(self):
@@ -94,6 +117,8 @@ class PolicyEngineTests(unittest.IsolatedAsyncioTestCase):
                 hot_path_backend_name="foundation_models",
                 deliberative_adapter=_HealthcheckAdapter(available=False),
                 deliberative_backend_name="mlx_lm",
+                fallback_adapter=_HealthcheckAdapter(available=False),
+                fallback_backend_name="anthropic",
             )
 
 
