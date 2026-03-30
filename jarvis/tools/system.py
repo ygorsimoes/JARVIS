@@ -28,3 +28,14 @@ class SystemTool:
         if return_code != 0:
             raise ToolExecutionError("failed to open app %s" % canonical_name)
         return {"app_name": canonical_name, "pid": process.pid}
+
+    async def set_volume(self, level: int) -> dict:
+        """Seta o volume do macOS de 0 a 100"""
+        level = max(0, min(100, level))
+        process = await asyncio.create_subprocess_exec(
+            "osascript", "-e", f"set volume output volume {level}"
+        )
+        return_code = await process.wait()
+        if return_code != 0:
+            raise ToolExecutionError("falhou em setar o volume")
+        return {"volume": level, "status": "success"}

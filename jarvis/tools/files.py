@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -20,3 +21,9 @@ class FilesTool:
         target = ensure_path_within_roots(path, self._allowed_roots)
         content = await asyncio.to_thread(target.read_text)
         return {"path": str(target), "content": content}
+
+    async def move(self, source_path: str, destination_path: str) -> dict:
+        src = ensure_path_within_roots(source_path, self._allowed_roots)
+        dst = ensure_path_within_roots(destination_path, self._allowed_roots)
+        await asyncio.to_thread(shutil.move, str(src), str(dst))
+        return {"source": str(src), "destination": str(dst), "status": "success"}

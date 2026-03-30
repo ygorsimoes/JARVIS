@@ -8,6 +8,8 @@ from .browser import BrowserTool
 from .files import FilesTool
 from .system import SystemTool
 from .timer import TimerTool
+from .shell import ShellTool
+from .calendar import CalendarTool
 
 ToolHandler = Callable[..., Awaitable[Any]]
 
@@ -110,6 +112,8 @@ def build_default_registry(config: JarvisConfig) -> ToolRegistry:
     system_tool = SystemTool(config.system_allowed_apps)
     browser_tool = BrowserTool()
     files_tool = FilesTool(config.allowed_file_roots)
+    shell_tool = ShellTool()
+    calendar_tool = CalendarTool()
 
     registry.register(
         "system.get_time",
@@ -189,6 +193,63 @@ def build_default_registry(config: JarvisConfig) -> ToolRegistry:
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "files.move",
+        "Move ou renomeia um arquivo ou pasta dentro das raizes permitidas.",
+        files_tool.move,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_path": {"type": "string"},
+                "destination_path": {"type": "string"}
+            },
+            "required": ["source_path", "destination_path"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "browser.fetch_url",
+        "Le o conteudo de texto bruto de uma url HTTP(s).",
+        browser_tool.fetch_url,
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "system.set_volume",
+        "Configura o nivel de volume global do macOS (0-100).",
+        system_tool.set_volume,
+        input_schema={
+            "type": "object",
+            "properties": {"level": {"type": "integer", "minimum": 0}},
+            "required": ["level"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "shell.execute",
+        "Executa um comando de terminal seguro (ls, pwd, etc).",
+        shell_tool.execute,
+        input_schema={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
+        "calendar.list_events",
+        "Lista eventos nos proximos n dias a partir do app nativo de Calendario do macOS.",
+        calendar_tool.list_events,
+        input_schema={
+            "type": "object",
+            "properties": {"days": {"type": "integer", "minimum": 1}},
             "additionalProperties": False,
         },
     )

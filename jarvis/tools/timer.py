@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
@@ -38,12 +39,30 @@ class TimerTool:
             duration_seconds=duration_seconds,
         )
         self._timers[timer.timer_id] = timer
+
+        # Start expiration task
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._wait_and_notify(timer.timer_id, duration_seconds, timer.label))
+        timer.task = task
+
         return {
             "timer_id": timer.timer_id,
             "label": timer.label,
             "duration_seconds": timer.duration_seconds,
             "ends_at": timer.ends_at.isoformat(),
         }
+
+    async def _wait_and_notify(self, timer_id: str, duration_seconds: int, label: str):
+        try:
+            await asyncio.sleep(duration_seconds)
+            if timer_id in self._timers:
+                self._timers.pop(timer_id, None)
+                msg = f"Timer '{label}' finalizado."
+                cmd = f'display notification "{msg}" with title "J.A.R.V.I.S." sound name "Glass"'
+                process = await asyncio.create_subprocess_exec("osascript", "-e", cmd)
+                await process.wait()
+        except asyncio.CancelledError:
+            pass
 
     async def list(self) -> list:
         return [
@@ -56,8 +75,12 @@ class TimerTool:
         ]
 
     async def cancel(self, timer_id: str) -> dict:
-        timer = self._timers.pop(timer_id)
-        return {"timer_id": timer.timer_id, "cancelled": True}
+        timer = self._timers.pop(timer_id, None)
+        if timer:
+            if hasattr(timer, "task") and not timer.task.done():
+                timer.task.cancel()
+            return {"timer_id": timer.timer_id, "cancelled": True}
+        return {"error": "Timer nao encontrado."}
 
 
 def parse_duration_seconds(text: str) -> Optional[int]:
