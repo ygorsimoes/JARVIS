@@ -3,8 +3,10 @@ import unittest
 from typing import Any, cast
 from unittest.mock import patch
 
+from jarvis.core.action_broker import ActionBroker, ActionRequest
+from jarvis.core.capability_broker import Capability, CapabilityBroker
 from jarvis.config import JarvisConfig
-from jarvis.models.conversation import Role, RouteTarget
+from jarvis.models.conversation import Role, RouteDecision, RouteTarget
 from jarvis.models.events import EventType
 from jarvis.models.memory import Memory, MemoryCategory, MemorySource
 from jarvis.models.state import JarvisState
@@ -341,6 +343,131 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         memory_system = cast(Any, self.runtime.memory_system)
         self.assertEqual(memory_system.calls, [])
+
+    async def test_direct_tool_confirmation_is_rendered_as_user_message(self):
+        async def set_volume(level: int) -> dict:
+            return {"volume": level}
+
+        registry = self.runtime.tool_registry
+        registry.register(
+            "system.set_volume",
+            "Ajusta volume",
+            set_volume,
+            input_schema={
+                "type": "object",
+                "properties": {"level": {"type": "integer", "minimum": 0}},
+                "required": ["level"],
+                "additionalProperties": False,
+            },
+        )
+        self.runtime.action_broker = ActionBroker(
+            CapabilityBroker(
+                [
+                    Capability(
+                        "system.set_volume",
+                        enabled=True,
+                        requires_confirmation=True,
+                        side_effects=["system_volume"],
+                    )
+                ]
+            ),
+            registry,
+        )
+
+        response = await self.runtime._execute_direct_tool(
+            "ajusta o volume para 40",
+            RouteDecision(
+                target=RouteTarget.DIRECT_TOOL,
+                tool_name="system.set_volume",
+                reason="acao direta de sistema",
+            ),
+        )
+
+        self.assertIn("Preciso da sua confirmacao", response)
+        self.assertIn("system_volume", response)
+
+    async def test_llm_tool_confirmation_returns_structured_payload(self):
+        async def set_volume(level: int) -> dict:
+            return {"volume": level}
+
+        registry = self.runtime.tool_registry
+        registry.register("system.set_volume", "Ajusta volume", set_volume)
+        self.runtime.action_broker = ActionBroker(
+            CapabilityBroker(
+                [
+                    Capability(
+                        "system.set_volume",
+                        enabled=True,
+                        requires_confirmation=True,
+                        side_effects=["system_volume"],
+                    )
+                ]
+            ),
+            registry,
+        )
+
+        payload = await self.runtime._invoke_llm_tool(
+            "system.set_volume", {"level": 20}
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "confirmation_required",
+                "tool_name": "system.set_volume",
+                "scope": "global",
+                "side_effects": ["system_volume"],
+                "message": "tool system.set_volume requires explicit confirmation",
+            },
+        )
+
+    async def test_runtime_tool_events_include_side_effects_and_audit_flags(self):
+        subscription = await self.runtime.event_bus.subscribe([EventType.TOOL_EXECUTED])
+
+        async def set_volume(level: int) -> dict:
+            return {"volume": level}
+
+        registry = self.runtime.tool_registry
+        registry.register(
+            "system.set_volume",
+            "Ajusta volume",
+            set_volume,
+            input_schema={
+                "type": "object",
+                "properties": {"level": {"type": "integer", "minimum": 0}},
+                "required": ["level"],
+                "additionalProperties": False,
+            },
+        )
+        self.runtime.action_broker = ActionBroker(
+            CapabilityBroker(
+                [
+                    Capability(
+                        "system.set_volume",
+                        enabled=True,
+                        requires_confirmation=True,
+                        side_effects=["system_volume"],
+                    )
+                ]
+            ),
+            registry,
+        )
+
+        result = await self.runtime._execute_action_request(
+            ActionRequest(
+                tool_name="system.set_volume",
+                arguments={"level": 40},
+                confirmed=True,
+                source="direct_tool",
+            ),
+            acting_reason="testing",
+        )
+
+        self.assertEqual(result.side_effects, ["system_volume"])
+        event = await subscription.get()
+        self.assertEqual(event.payload["side_effects"], ["system_volume"])
+        self.assertTrue(event.payload["confirmed"])
+        self.assertTrue(event.payload["audit_logged"])
 
     async def test_runtime_events_include_session_turn_and_backend_metadata(self):
         subscription = await self.runtime.event_bus.subscribe(

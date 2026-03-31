@@ -18,6 +18,7 @@ class TimerRecord:
     label: str
     duration_seconds: int
     created_at: datetime = field(default_factory=utc_now)
+    task: asyncio.Task | None = None
 
     @property
     def ends_at(self) -> datetime:
@@ -42,7 +43,9 @@ class TimerTool:
 
         # Start expiration task
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self._wait_and_notify(timer.timer_id, duration_seconds, timer.label))
+        task = loop.create_task(
+            self._wait_and_notify(timer.timer_id, duration_seconds, timer.label)
+        )
         timer.task = task
 
         return {
@@ -65,22 +68,25 @@ class TimerTool:
             pass
 
     async def list(self) -> list:
-        return [
-            {
-                "timer_id": timer.timer_id,
-                "label": timer.label,
-                "remaining_seconds": timer.remaining_seconds,
-            }
-            for timer in self._timers.values()
-        ]
+        return sorted(
+            [
+                {
+                    "timer_id": timer.timer_id,
+                    "label": timer.label,
+                    "remaining_seconds": timer.remaining_seconds,
+                }
+                for timer in self._timers.values()
+            ],
+            key=lambda timer: (timer["remaining_seconds"], timer["label"]),
+        )
 
     async def cancel(self, timer_id: str) -> dict:
         timer = self._timers.pop(timer_id, None)
         if timer:
-            if hasattr(timer, "task") and not timer.task.done():
+            if timer.task is not None and not timer.task.done():
                 timer.task.cancel()
             return {"timer_id": timer.timer_id, "cancelled": True}
-        return {"error": "Timer nao encontrado."}
+        return {"timer_id": timer_id, "cancelled": False}
 
 
 def parse_duration_seconds(text: str) -> Optional[int]:

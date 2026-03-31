@@ -12,7 +12,12 @@ from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
 from .bus import EventBus
 from .config import JarvisConfig
 from .core.action_broker import ActionBroker, ActionRequest
-from .core.capability_broker import Capability, CapabilityBroker, RiskLevel
+from .core.capability_broker import (
+    Capability,
+    CapabilityBroker,
+    ConfirmationRequiredError,
+    RiskLevel,
+)
 from .core.complexity_router import ComplexityRouter
 from .core.dialogue_manager import DialogueManager
 from .core.policy_engine import PolicyEngine
@@ -23,9 +28,14 @@ from .core.state_machine import StateMachine
 from .core.turn_manager import CompletedTurn, TurnManager, TurnManagerConfig
 from .memory import MemorySystem
 from .models.actions import (
+    BrowserFetchURLAction,
     BrowserSearchAction,
+    CancelTimerAction,
     GetTimeAction,
+    ListCalendarEventsAction,
+    ListTimersAction,
     OpenAppAction,
+    SetVolumeAction,
     StartTimerAction,
 )
 from .models.conversation import RouteDecision, RouteTarget, Role
@@ -774,36 +784,62 @@ class JarvisRuntime:
 
     async def _execute_direct_tool(self, text: str, route: RouteDecision) -> str:
         action = self._build_direct_action(text, route)
-        request = ActionRequest.from_action(action)
-        result = await self.action_broker.execute(request)
-        await self._publish_event(
-            EventType.TOOL_EXECUTED,
-            {"tool_name": result.tool_name, "output": result.output},
-        )
+        request = ActionRequest.from_action(action, source="direct_tool")
+        try:
+            result = await self._execute_action_request(
+                request,
+                acting_reason="executing direct tool",
+            )
+        except ConfirmationRequiredError as exc:
+            return self._format_confirmation_required(exc)
         return self._format_tool_output(result.tool_name, result.output)
 
     async def _invoke_llm_tool(self, tool_name: str, arguments: dict) -> object:
         if not isinstance(arguments, dict):
             raise TypeError("llm tool arguments must be an object")
 
+        try:
+            result = await self._execute_action_request(
+                ActionRequest(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    source="llm_tool",
+                ),
+                acting_reason="executing llm-requested tool",
+            )
+            return result.output
+        except ConfirmationRequiredError as exc:
+            return exc.to_payload()
+
+    async def _execute_action_request(
+        self,
+        request: ActionRequest,
+        *,
+        acting_reason: str,
+    ):
         transitioned_to_acting = False
         if self.state_machine.state == JarvisState.THINKING:
             await self.state_machine.transition(
                 JarvisState.ACTING,
-                "executing llm-requested tool",
-                {"tool_name": tool_name},
+                acting_reason,
+                {"tool_name": request.tool_name},
             )
             transitioned_to_acting = True
 
         try:
-            result = await self.action_broker.execute(
-                ActionRequest(tool_name=tool_name, arguments=arguments)
-            )
+            result = await self.action_broker.execute(request)
             await self._publish_event(
                 EventType.TOOL_EXECUTED,
-                {"tool_name": result.tool_name, "output": result.output},
+                {
+                    "tool_name": result.tool_name,
+                    "output": result.output,
+                    "scope": result.scope,
+                    "confirmed": result.confirmed,
+                    "side_effects": list(result.side_effects),
+                    "audit_logged": result.audit_logged,
+                },
             )
-            return result.output
+            return result
         finally:
             if (
                 transitioned_to_acting
@@ -811,13 +847,15 @@ class JarvisRuntime:
             ):
                 await self.state_machine.transition(
                     JarvisState.THINKING,
-                    "llm-requested tool completed",
-                    {"tool_name": tool_name},
+                    "tool execution completed",
+                    {"tool_name": request.tool_name},
                 )
 
     def _build_direct_action(self, text: str, route: RouteDecision):
         if route.tool_name == "system.get_time":
             return GetTimeAction()
+        if route.tool_name == "system.set_volume":
+            return SetVolumeAction(level=self._extract_volume_level(text))
         if route.tool_name == "timer.start":
             duration_seconds = parse_duration_seconds(text)
             if duration_seconds is None:
@@ -825,9 +863,17 @@ class JarvisRuntime:
             return StartTimerAction(
                 duration_seconds=duration_seconds, label=text.strip()
             )
+        if route.tool_name == "timer.list":
+            return ListTimersAction()
+        if route.tool_name == "timer.cancel":
+            return CancelTimerAction(timer_id=self._extract_timer_id(text))
         if route.tool_name == "browser.search":
             query = self._extract_search_query(text)
             return BrowserSearchAction(query=query)
+        if route.tool_name == "browser.fetch_url":
+            return BrowserFetchURLAction(url=self._extract_url(text))
+        if route.tool_name == "calendar.list_events":
+            return ListCalendarEventsAction(days=self._extract_days_window(text))
         if route.tool_name == "system.open_app":
             app_name = self._extract_app_name(text)
             return OpenAppAction(app_name=app_name)
@@ -850,20 +896,86 @@ class JarvisRuntime:
         return text.strip()
 
     @staticmethod
+    def _extract_volume_level(text: str) -> int:
+        import re
+
+        match = re.search(r"(\d{1,3})", text)
+        if match is None:
+            raise ValueError("nao consegui interpretar o nivel de volume")
+        level = int(match.group(1))
+        if level < 0 or level > 100:
+            raise ValueError("o nivel de volume deve estar entre 0 e 100")
+        return level
+
+    @staticmethod
+    def _extract_timer_id(text: str) -> str:
+        import re
+
+        match = re.search(
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+            text,
+        )
+        if match is None:
+            raise ValueError("nao consegui identificar o timer para cancelar")
+        return match.group(1)
+
+    @staticmethod
+    def _extract_url(text: str) -> str:
+        import re
+
+        match = re.search(r"https?://\S+", text)
+        if match is None:
+            raise ValueError("nao encontrei uma URL HTTP(s) no pedido")
+        return match.group(0).rstrip(".,)")
+
+    @staticmethod
+    def _extract_days_window(text: str) -> int:
+        import re
+
+        match = re.search(r"(\d+)\s*dias?", text.lower())
+        if match is None:
+            return 1
+        return max(1, int(match.group(1)))
+
+    @staticmethod
     def _format_tool_output(tool_name: str, output) -> str:
         if tool_name == "system.get_time":
             return "Agora sao %s." % output["time"]
+        if tool_name == "system.set_volume":
+            return "Volume ajustado para %d." % output["volume"]
         if tool_name == "timer.start":
             duration_seconds = int(output["duration_seconds"])
             minutes = duration_seconds // 60
             if minutes and duration_seconds % 60 == 0:
                 return "Timer definido para %d minutos." % minutes
             return "Timer definido para %d segundos." % duration_seconds
+        if tool_name == "timer.list":
+            count = len(output)
+            return "Existem %d timers ativos." % count
+        if tool_name == "timer.cancel":
+            if output.get("cancelled"):
+                return "Timer cancelado."
+            return "Nao encontrei esse timer para cancelar."
         if tool_name == "browser.search":
             return "Busca aberta para %s." % output["query"]
+        if tool_name == "browser.fetch_url":
+            if output.get("status") == "success":
+                return "Conteudo carregado de %s." % output["url"]
+            return "Nao consegui carregar a URL informada."
+        if tool_name == "calendar.list_events":
+            return "Encontrei %d eventos." % output.get("count", 0)
         if tool_name == "system.open_app":
             return "%s aberto." % output["app_name"]
         return str(output)
+
+    @staticmethod
+    def _format_confirmation_required(exc: ConfirmationRequiredError) -> str:
+        if exc.side_effects:
+            return "Preciso da sua confirmacao para executar %s. Efeitos: %s." % (
+                exc.tool_name,
+                ", ".join(exc.side_effects),
+            )
+        return "Preciso da sua confirmacao para executar %s." % exc.tool_name
 
     def _set_active_turn_context(
         self, route: RouteDecision, backend_name: Optional[str]

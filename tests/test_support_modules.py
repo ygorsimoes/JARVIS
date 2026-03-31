@@ -63,6 +63,13 @@ class SupportModulesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_duration_seconds("45 segundos"), 45)
         self.assertIsNone(parse_duration_seconds("sem tempo"))
 
+    async def test_timer_cancel_unknown_returns_false(self):
+        tool = TimerTool()
+
+        cancelled = await tool.cancel("missing-timer")
+
+        self.assertEqual(cancelled, {"timer_id": "missing-timer", "cancelled": False})
+
 
 class SecurityHelpersTests(unittest.TestCase):
     def test_normalize_roots_and_enforce_bounds(self):

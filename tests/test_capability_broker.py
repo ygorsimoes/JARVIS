@@ -40,6 +40,54 @@ class CapabilityBrokerTests(unittest.TestCase):
         self.assertEqual(global_tools, {"browser.search"})
         self.assertEqual(project_tools, {"browser.search", "files.read"})
 
+    def test_supports_multiple_scopes_and_respects_audit_log_flag(self):
+        broker = CapabilityBroker(
+            [
+                Capability(
+                    "files.move",
+                    enabled=True,
+                    scope=("project", "workspace"),
+                    audit_log=False,
+                )
+            ]
+        )
+
+        capability = broker.authorize("files.move", scope="project", confirmed=False)
+
+        self.assertEqual(capability.scopes, ("project", "workspace"))
+        self.assertEqual(broker.audit_log, [])
+
+        with self.assertRaises(CapabilityDeniedError):
+            broker.authorize("files.move", scope="global")
+
+        self.assertEqual(broker.audit_log, [])
+
+    def test_confirmation_error_exposes_payload(self):
+        broker = CapabilityBroker(
+            [
+                Capability(
+                    "system.set_volume",
+                    enabled=True,
+                    requires_confirmation=True,
+                    side_effects=["system_volume"],
+                )
+            ]
+        )
+
+        with self.assertRaises(ConfirmationRequiredError) as context:
+            broker.authorize("system.set_volume")
+
+        self.assertEqual(
+            context.exception.to_payload(),
+            {
+                "status": "confirmation_required",
+                "tool_name": "system.set_volume",
+                "scope": "global",
+                "side_effects": ["system_volume"],
+                "message": "tool system.set_volume requires explicit confirmation",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
