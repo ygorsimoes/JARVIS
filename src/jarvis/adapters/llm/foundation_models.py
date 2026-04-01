@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -19,6 +20,9 @@ from typing import (
 from urllib.parse import urlparse
 
 from ...models.conversation import Message, Role
+from ...observability import get_logger
+
+logger = get_logger(__name__)
 
 
 class FoundationModelsBridgeAdapter:
@@ -261,6 +265,11 @@ class FoundationModelsBridgeAdapter:
     async def _ensure_session(self, tools: List[dict]) -> bool:
         tools_signature = json.dumps(tools, sort_keys=True)
         if self.session_id and self._session_tools_signature == tools_signature:
+            logger.info(
+                "Reusing Foundation Models session",
+                session_id=self.session_id,
+                tools_count=len(tools),
+            )
             return False
         if self.session_id and self._session_tools_signature != tools_signature:
             await self.close_session()
@@ -281,6 +290,11 @@ class FoundationModelsBridgeAdapter:
         parsed = json.loads(body.decode("utf-8"))
         self.session_id = parsed["session_id"]
         self._session_tools_signature = tools_signature
+        logger.info(
+            "Created Foundation Models session",
+            session_id=self.session_id,
+            tools_count=len(tools),
+        )
         return True
 
     async def _ensure_service_running(self) -> None:
@@ -301,8 +315,14 @@ class FoundationModelsBridgeAdapter:
                     "Foundation Models bridge binary not found at %s" % binary
                 )
 
+            started = time.perf_counter()
             if self._process is None or self._process.returncode is not None:
                 host, port = self._host_and_port()
+                logger.info(
+                    "Starting Foundation Models bridge",
+                    base_url=self.base_url,
+                    binary=str(binary),
+                )
                 self._process = await asyncio.create_subprocess_exec(
                     str(binary),
                     "--host",
@@ -318,6 +338,17 @@ class FoundationModelsBridgeAdapter:
             for _ in range(40):
                 health = await self._service_health()
                 if health is not None:
+                    payload = health.get("payload")
+                    availability_payload: dict[str, object] = (
+                        payload if isinstance(payload, dict) else {}
+                    )
+                    logger.info(
+                        "Foundation Models bridge ready",
+                        base_url=self.base_url,
+                        status=availability_payload.get("status"),
+                        availability=availability_payload.get("availability"),
+                        startup_ms=int((time.perf_counter() - started) * 1000),
+                    )
                     return
                 await asyncio.sleep(0.25)
 

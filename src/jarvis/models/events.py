@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -8,6 +9,10 @@ from typing import Any, Dict
 
 def utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def monotonic_now_ns() -> int:
+    return time.perf_counter_ns()
 
 
 class EventType(str, Enum):
@@ -39,3 +44,4 @@ class Event:
     event_type: EventType
     payload: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
+    created_at_monotonic_ns: int = field(default_factory=monotonic_now_ns)

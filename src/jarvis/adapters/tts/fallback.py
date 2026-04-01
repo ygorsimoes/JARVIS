@@ -17,9 +17,12 @@ class FallbackTTSAdapter:
         self.fallback_name = fallback_name
         self._last_successful = primary
         self._fallback_only = False
+        self._effective_backend_name = primary_name
+        self._last_error_message: str | None = None
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
         if self._fallback_only:
+            self._effective_backend_name = self.fallback_name
             async for chunk in self.fallback.synthesize_stream(text):
                 self._last_successful = self.fallback
                 yield chunk
@@ -30,13 +33,17 @@ class FallbackTTSAdapter:
             async for chunk in self.primary.synthesize_stream(text):
                 emitted_any_chunk = True
                 self._last_successful = self.primary
+                self._effective_backend_name = self.primary_name
+                self._last_error_message = None
                 yield chunk
             return
         except Exception as exc:
             if emitted_any_chunk:
                 raise
             self._fallback_only = True
-            logger.debug(
+            self._effective_backend_name = self.fallback_name
+            self._last_error_message = str(exc)
+            logger.warning(
                 "Primary TTS backend failed, falling back",
                 primary=self.primary_name,
                 fallback=self.fallback_name,
@@ -46,6 +53,15 @@ class FallbackTTSAdapter:
         async for chunk in self.fallback.synthesize_stream(text):
             self._last_successful = self.fallback
             yield chunk
+
+    def trace_backend_state(self) -> dict[str, object]:
+        return {
+            "tts_primary_backend": self.primary_name,
+            "tts_fallback_backend": self.fallback_name,
+            "tts_effective_backend": self._effective_backend_name,
+            "tts_fallback_active": self._effective_backend_name == self.fallback_name,
+            "tts_last_error": self._last_error_message,
+        }
 
     async def cancel_current_synthesis(self) -> bool:
         cancelled = False

@@ -4,6 +4,8 @@ import asyncio
 import threading
 from typing import AsyncIterator
 
+import numpy as np
+
 
 class MLXAudioQwen3Adapter:
     def __init__(self, model_repo: str, speaker_id: str) -> None:
@@ -33,7 +35,11 @@ class MLXAudioQwen3Adapter:
             if audio is None:
                 continue
 
-            yield audio.tobytes()
+            tobytes = getattr(audio, "tobytes", None)
+            if callable(tobytes):
+                yield tobytes()
+            else:
+                yield np.asarray(audio, dtype=np.float32).tobytes()
 
     async def cancel_current_synthesis(self) -> bool:
         self._cancel_event.set()

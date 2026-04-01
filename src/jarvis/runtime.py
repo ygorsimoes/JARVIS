@@ -44,8 +44,11 @@ from .models.conversation import Role, RouteDecision, RouteTarget
 from .models.events import Event, EventType
 from .models.memory import Memory
 from .models.state import JarvisState
+from .observability import VoiceTraceReporter, get_logger
 from .tools import ToolRegistry, build_default_registry
 from .tools.timer import parse_duration_seconds
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -152,6 +155,7 @@ class JarvisRuntime:
         self._active_turn: ActiveTurnExecution | None = None
         self._pending_voice_pipeline: SpeechPipeline | None = None
         self._pending_voice_relisten = False
+        self._trace_reporter: VoiceTraceReporter | None = None
 
     @classmethod
     def from_config(
@@ -203,7 +207,7 @@ class JarvisRuntime:
         )
         memory_system = MemorySystem(memory_adapter)
 
-        return cls(
+        runtime = cls(
             config=config,
             event_bus=event_bus,
             state_machine=state_machine,
@@ -233,105 +237,165 @@ class JarvisRuntime:
             memory_adapter=memory_adapter,
             memory_system=memory_system,
         )
+        logger.info(
+            "Runtime backends configured", **runtime.trace_configuration_payload()
+        )
+        return runtime
 
     async def run_voice_foreground(self, turn_limit: Optional[int] = None) -> None:
+        await self._ensure_trace_reporter_started()
         handled_turns = 0
         carry_activation = False
-        while turn_limit is None or handled_turns < turn_limit:
-            handoff_capture = carry_activation
-            carry_activation = False
-            if not handoff_capture:
-                activated = await self.activation_adapter.listen()
-                if not activated:
+        try:
+            while turn_limit is None or handled_turns < turn_limit:
+                handoff_capture = carry_activation
+                carry_activation = False
+                if not handoff_capture:
+                    activated = await self.activation_adapter.listen()
+                    if not activated:
+                        continue
+
+                voice_turn_id = str(uuid.uuid4())
+                if self._trace_reporter is not None:
+                    self._trace_reporter.register_turn_start(voice_turn_id)
+
+                partial_state = {"text": "", "printed": False}
+
+                def on_partial_transcript(text: str) -> None:
+                    normalized = text.strip()
+                    if not normalized or normalized == partial_state["text"]:
+                        return
+                    partial_state["text"] = normalized
+                    partial_state["printed"] = True
+                    if self._trace_reporter is not None:
+                        print(
+                            self._trace_reporter.format_conversation_line(
+                                "voce~>",
+                                normalized,
+                                turn_id=voice_turn_id,
+                            )
+                        )
+                        return
+                    if sys.stdout.isatty():
+                        print(
+                            "voce~> %s" % normalized,
+                            end="\r",
+                            flush=True,
+                        )
+                    else:
+                        print("voce~> %s" % normalized)
+
+                await self._publish_event(
+                    EventType.ACTIVATION_TRIGGERED,
+                    {
+                        "source": (
+                            "barge_in_handoff" if handoff_capture else "foreground"
+                        )
+                    },
+                    turn_id=voice_turn_id,
+                    mode="voice",
+                    backend=self.activation_backend_name,
+                )
+
+                try:
+                    voice_turn = await self.capture_voice_turn(
+                        on_partial_transcript=on_partial_transcript,
+                        turn_id=voice_turn_id,
+                    )
+                except VoiceCaptureError as exc:
+                    if (
+                        partial_state["printed"]
+                        and sys.stdout.isatty()
+                        and self._trace_reporter is None
+                    ):
+                        print("", flush=True)
+                    self._print_conversation_line(
+                        "jarvis>",
+                        str(exc),
+                        turn_id=voice_turn_id,
+                    )
+                    if handoff_capture:
+                        continue
+                    handled_turns += 1
                     continue
 
-            partial_state = {"text": "", "printed": False}
-
-            def on_partial_transcript(text: str) -> None:
-                normalized = text.strip()
-                if not normalized or normalized == partial_state["text"]:
-                    return
-                partial_state["text"] = normalized
-                partial_state["printed"] = True
-                if sys.stdout.isatty():
-                    print("voce~> %s" % normalized, end="\r", flush=True)
-                else:
-                    print("voce~> %s" % normalized)
-
-            await self._publish_event(
-                EventType.ACTIVATION_TRIGGERED,
-                {"source": "barge_in_handoff" if handoff_capture else "foreground"},
-                mode="voice",
-                backend=self.activation_backend_name,
-            )
-
-            try:
-                voice_turn = await self.capture_voice_turn(
-                    on_partial_transcript=on_partial_transcript
-                )
-            except VoiceCaptureError as exc:
-                if partial_state["printed"] and sys.stdout.isatty():
+                if (
+                    partial_state["printed"]
+                    and sys.stdout.isatty()
+                    and self._trace_reporter is None
+                ):
                     print("", flush=True)
-                print("jarvis> %s" % exc)
-                if handoff_capture:
+                self._print_conversation_line(
+                    "voce>",
+                    voice_turn.text,
+                    turn_id=voice_turn.turn_id,
+                )
+                pipeline = SpeechPipeline(
+                    tts_adapter=self.tts_adapter,
+                    playback_backend=self.playback_backend,
+                    sample_rate_hz=self.config.tts_sample_rate_hz,
+                    event_bus=self.event_bus,
+                    event_context=self._voice_pipeline_event_context(
+                        voice_turn.turn_id
+                    ),
+                )
+                self._pending_voice_pipeline = pipeline
+                await pipeline.start()
+                response_queue: asyncio.Queue = asyncio.Queue()
+                response_task = asyncio.create_task(
+                    self._pump_turn_chunks_to_queue(
+                        self.stream_transcribed_turn(
+                            voice_turn.text,
+                            turn_id=voice_turn.turn_id,
+                        ),
+                        response_queue,
+                    ),
+                    name="jarvis-voice-response",
+                )
+                barge_in_task = asyncio.create_task(
+                    self._barge_in_watcher(response_task),
+                    name="jarvis-barge-in-watcher",
+                )
+                try:
+                    while True:
+                        item = await response_queue.get()
+                        if item is None:
+                            break
+                        if isinstance(item, Exception):
+                            raise item
+                        self._print_conversation_line(
+                            "jarvis>",
+                            item.sentence,
+                            turn_id=voice_turn.turn_id,
+                        )
+                        await pipeline.enqueue_sentence(item.index, item.sentence)
+                    await pipeline.finish()
+                finally:
+                    self._pending_voice_pipeline = None
+                    if not response_task.done():
+                        response_task.cancel()
+                    try:
+                        await response_task
+                    except asyncio.CancelledError:
+                        pass
+                    if not barge_in_task.done():
+                        barge_in_task.cancel()
+                    try:
+                        await barge_in_task
+                    except asyncio.CancelledError:
+                        pass
+                    await pipeline.shutdown()
+
+                if self._consume_pending_voice_relisten():
+                    carry_activation = True
                     continue
                 handled_turns += 1
-                continue
-            if partial_state["printed"] and sys.stdout.isatty():
-                print("", flush=True)
-            print("voce> %s" % voice_turn.text)
-            pipeline = SpeechPipeline(
-                tts_adapter=self.tts_adapter,
-                playback_backend=self.playback_backend,
-                sample_rate_hz=self.config.tts_sample_rate_hz,
-                event_bus=self.event_bus,
-            )
-            self._pending_voice_pipeline = pipeline
-            await pipeline.start()
-            response_queue: asyncio.Queue = asyncio.Queue()
-            response_task = asyncio.create_task(
-                self._pump_turn_chunks_to_queue(
-                    self.stream_transcribed_turn(
-                        voice_turn.text,
-                        turn_id=voice_turn.turn_id,
-                    ),
-                    response_queue,
-                ),
-                name="jarvis-voice-response",
-            )
-            barge_in_task = asyncio.create_task(
-                self._barge_in_watcher(response_task),
-                name="jarvis-barge-in-watcher",
-            )
-            try:
-                while True:
-                    item = await response_queue.get()
-                    if item is None:
-                        break
-                    if isinstance(item, Exception):
-                        raise item
-                    print("jarvis> %s" % item.sentence)
-                    await pipeline.enqueue_sentence(item.index, item.sentence)
-                await pipeline.finish()
-            finally:
-                self._pending_voice_pipeline = None
-                if not response_task.done():
-                    response_task.cancel()
-                try:
-                    await response_task
-                except asyncio.CancelledError:
-                    pass
-                if not barge_in_task.done():
-                    barge_in_task.cancel()
-                try:
-                    await barge_in_task
-                except asyncio.CancelledError:
-                    pass
-                await pipeline.shutdown()
-            if self._consume_pending_voice_relisten():
-                carry_activation = True
-                continue
-            handled_turns += 1
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._trace_reporter is not None:
+                await self._trace_reporter.shutdown(self.event_bus)
+                self._trace_reporter = None
 
     async def _barge_in_watcher(
         self,
@@ -357,8 +421,9 @@ class JarvisRuntime:
     async def capture_voice_turn(
         self,
         on_partial_transcript: Callable[[str], None] | None = None,
+        turn_id: Optional[str] = None,
     ) -> CapturedVoiceTurn:
-        turn_id = str(uuid.uuid4())
+        turn_id = turn_id or str(uuid.uuid4())
         turn_manager = TurnManager(self.turn_manager_config)
         saw_speech_signal = False
         saw_partial_transcript = False
@@ -569,6 +634,9 @@ class JarvisRuntime:
         if self._pending_voice_pipeline is not None:
             await self._pending_voice_pipeline.shutdown()
             self._pending_voice_pipeline = None
+        if self._trace_reporter is not None:
+            await self._trace_reporter.shutdown(self.event_bus)
+            self._trace_reporter = None
         for adapter in (
             self.activation_adapter,
             self.hot_path_adapter,
@@ -746,6 +814,10 @@ class JarvisRuntime:
                     else route.target.value
                 ),
                 "policy_reason": llm_plan.reason if llm_plan is not None else None,
+                "fallback_used": (
+                    llm_plan.fallback_used if llm_plan is not None else False
+                ),
+                "backend_detail": self._backend_detail_for_name(backend_name),
             },
             route=route,
             backend=backend_name,
@@ -1231,6 +1303,129 @@ class JarvisRuntime:
                 continue
         return " em %s" % raw
 
+    async def _ensure_trace_reporter_started(self) -> None:
+        if self.config.trace_mode == "off":
+            return
+        if self._trace_reporter is None:
+            self._trace_reporter = VoiceTraceReporter(
+                session_id=self.session_id,
+                mode=self.config.trace_mode,
+                jsonl_path=self.config.trace_jsonl_path,
+            )
+            await self._trace_reporter.start(self.event_bus)
+            self._trace_reporter.emit_session_configuration(
+                self.trace_configuration_payload()
+            )
+
+    def _print_conversation_line(
+        self,
+        prefix: str,
+        text: str,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        if self._trace_reporter is not None:
+            print(
+                self._trace_reporter.format_conversation_line(
+                    prefix,
+                    text,
+                    turn_id=turn_id,
+                )
+            )
+            return
+        print("%s %s" % (prefix, text))
+
+    def trace_configuration_payload(self) -> dict[str, object]:
+        return {
+            "activation_backend": self.activation_backend_name,
+            "activation_hotkey": self.config.activation_hotkey,
+            "stt_backend": self.stt_backend_name,
+            "stt_locale": self.config.stt_locale,
+            "stt_binary": self.config.stt_bridge_bin,
+            "hot_path_backend": self.hot_path_backend_name,
+            "hot_path_url": self.config.llm_hot_path_url,
+            "hot_path_bridge_bin": self.config.llm_hot_path_bridge_bin,
+            "deliberative_backend": self.deliberative_backend_name,
+            "deliberative_model": self.config.llm_deliberative_model,
+            "fallback_backend": self.fallback_backend_name,
+            "fallback_model": self.config.llm_hot_path_fallback_model,
+            "tts_backend": self.tts_backend_name,
+            "tts_configured_backend": self.config.tts_backend,
+            "tts_model": self.config.tts_model,
+            "tts_voice": self.config.tts_voice,
+            "tts_lang_code": self.config.tts_lang_code,
+            "tts_avspeech_voice": self.config.tts_avspeech_voice,
+            "playback_backend": self.playback_backend_name,
+        }
+
+    def _voice_pipeline_event_context(self, turn_id: str) -> dict[str, object]:
+        def build_context() -> dict[str, object]:
+            context: dict[str, object] = {
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "mode": "voice",
+                "backend": self.tts_backend_name,
+                "tts_backend": self.tts_backend_name,
+                "tts_model": self.config.tts_model,
+                "tts_voice": self.config.tts_voice,
+                "playback_backend": self.playback_backend_name,
+            }
+            trace_backend_state = getattr(self.tts_adapter, "trace_backend_state", None)
+            if callable(trace_backend_state):
+                try:
+                    extra = trace_backend_state()
+                except Exception:
+                    extra = None
+                if isinstance(extra, dict):
+                    context.update(extra)
+            return context
+
+        return build_context
+
+    def _backend_detail_for_name(
+        self, backend_name: Optional[str]
+    ) -> dict[str, object] | None:
+        if backend_name is None:
+            return None
+        if backend_name == self.hot_path_backend_name:
+            return {
+                "backend": backend_name,
+                "model": "apple.foundation_models",
+                "bridge_url": self.config.llm_hot_path_url,
+                "bridge_bin": self.config.llm_hot_path_bridge_bin,
+            }
+        if backend_name == self.deliberative_backend_name:
+            return {
+                "backend": backend_name,
+                "model": self.config.llm_deliberative_model,
+            }
+        if backend_name == self.fallback_backend_name:
+            return {
+                "backend": backend_name,
+                "model": self.config.llm_hot_path_fallback_model,
+            }
+        if backend_name == self.tts_backend_name:
+            return {
+                "backend": backend_name,
+                "model": self.config.tts_model,
+                "voice": self.config.tts_voice,
+                "fallback_voice": self.config.tts_avspeech_voice,
+            }
+        if backend_name == self.stt_backend_name:
+            return {
+                "backend": backend_name,
+                "locale": self.config.stt_locale,
+                "binary": self.config.stt_bridge_bin,
+            }
+        if backend_name == self.activation_backend_name:
+            return {
+                "backend": backend_name,
+                "hotkey": self.config.activation_hotkey,
+            }
+        if backend_name == self.playback_backend_name:
+            return {"backend": backend_name}
+        return {"backend": backend_name}
+
     def _set_active_turn_context(
         self, route: RouteDecision, backend_name: Optional[str]
     ) -> None:
@@ -1304,6 +1499,9 @@ class JarvisRuntime:
                 enriched["tool_name"] = resolved_route.tool_name
         if resolved_backend is not None:
             enriched["backend"] = resolved_backend
+            enriched.setdefault(
+                "backend_detail", self._backend_detail_for_name(resolved_backend)
+            )
         if payload:
             enriched.update(payload)
         return enriched

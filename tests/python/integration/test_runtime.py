@@ -123,6 +123,38 @@ class FakePlaybackBackend:
         return None
 
 
+class FakeTraceReporter:
+    instances = []
+
+    def __init__(self, *, session_id, mode, jsonl_path, line_writer=None):
+        self.session_id = session_id
+        self.mode = mode
+        self.jsonl_path = jsonl_path
+        self.turns = []
+        self.started = False
+        self.shutdown_calls = 0
+        self.session_config = None
+        FakeTraceReporter.instances.append(self)
+
+    async def start(self, event_bus):
+        del event_bus
+        self.started = True
+
+    async def shutdown(self, event_bus=None):
+        del event_bus
+        self.shutdown_calls += 1
+
+    def register_turn_start(self, turn_id, *, monotonic_ns=None):
+        del monotonic_ns
+        self.turns.append(turn_id)
+
+    def emit_session_configuration(self, config):
+        self.session_config = dict(config)
+
+    def format_conversation_line(self, prefix, text, *, turn_id):
+        return "[trace %s] %s %s" % (turn_id[:8], prefix, text)
+
+
 class SlowHotPathAdapter:
     def __init__(self):
         self.cancelled = False
@@ -384,6 +416,44 @@ class TestRuntime:
             "Agora sao" in line for line in printed_lines if line.startswith("jarvis>")
         )
         assert self.runtime.state_machine.state == JarvisState.IDLE
+
+    async def test_run_voice_foreground_formats_conversation_lines_when_trace_is_enabled(
+        self,
+    ):
+        FakeTraceReporter.instances.clear()
+        self.runtime.config.trace_mode = "compact"
+        self.runtime.activation_adapter = FakeActivationAdapter([True])
+        self.runtime.stt_adapter = FakeSTTAdapter(
+            [
+                {"type": "speech_started"},
+                {"type": "partial_transcript", "text": "olá jarvis"},
+                {"type": "speech_ended"},
+                {"type": "final_transcript", "text": "Olá Jarvis"},
+            ]
+        )
+        self.runtime.playback_backend = FakePlaybackBackend()
+
+        with patch("jarvis.runtime.VoiceTraceReporter", FakeTraceReporter):
+            with patch("builtins.print") as print_mock:
+                await self.runtime.run_voice_foreground(turn_limit=1)
+
+        printed_lines = [
+            call.args[0] for call in print_mock.call_args_list if call.args
+        ]
+        assert any(
+            line.startswith("[trace ") and "voce~> olá jarvis" in line
+            for line in printed_lines
+        )
+        assert any(
+            line.startswith("[trace ") and "voce> Olá Jarvis" in line
+            for line in printed_lines
+        )
+        assert any(
+            line.startswith("[trace ")
+            and "jarvis> Resposta rapida para Olá Jarvis." in line
+            for line in printed_lines
+        )
+        assert FakeTraceReporter.instances[0].session_config is not None
 
     async def test_run_voice_foreground_reports_capture_failures_without_traceback(
         self,

@@ -100,6 +100,8 @@ class JarvisConfig(BaseSettings):
 
     log_level: str = "INFO"
     log_format: str = "auto"
+    trace_mode: str = "off"
+    trace_jsonl_path: Optional[str] = None
     system_prompt_override: Optional[str] = None
 
     @field_validator("allowed_file_roots", "system_allowed_apps", mode="before")

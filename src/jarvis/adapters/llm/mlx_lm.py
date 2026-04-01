@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import importlib
 import threading
+import time
 from typing import Any, AsyncIterator, Callable, List
 
 from ...model_cache import resolve_cached_model_reference
 from ...models.conversation import Message
+from ...observability import get_logger
+
+logger = get_logger(__name__)
 
 
 class MLXLMAdapter:
@@ -134,6 +138,8 @@ class MLXLMAdapter:
         if self._model is not None and self._tokenizer is not None:
             assert self._stream_generate is not None
             return self._model, self._tokenizer, self._stream_generate
+        started = time.perf_counter()
+        logger.info("Loading MLX language model", model_repo=self.model_repo)
         try:
             module = importlib.import_module("mlx_lm")
         except ImportError as exc:
@@ -146,6 +152,12 @@ class MLXLMAdapter:
         self._model, self._tokenizer = load(model_reference)
         self._load = load
         self._stream_generate = stream_generate
+        logger.info(
+            "MLX language model loaded",
+            model_repo=self.model_repo,
+            resolved_reference=str(model_reference),
+            load_ms=int((time.perf_counter() - started) * 1000),
+        )
         assert self._stream_generate is not None
         return self._model, self._tokenizer, self._stream_generate
 

@@ -26,9 +26,7 @@ dev = [
 [project.optional-dependencies]
 macos-ml = [
     "mlx-lm>=0.24.0",
-    "mlx-audio>=0.4.0",
-    "misaki>=0.9.4",
-    "num2words>=0.5.14",
+    "mlx-audio[tts]>=0.4.0",
 ]
 macos-native = [
     "pyobjc-framework-EventKit>=10",
@@ -53,9 +51,7 @@ http = [
 ]
 macos-runtime = [
     "mlx-lm>=0.24.0",
-    "mlx-audio>=0.4.0",
-    "misaki>=0.9.4",
-    "num2words>=0.5.14",
+    "mlx-audio[tts]>=0.4.0",
     "numpy>=1.26,<3",
     "pynput>=1.7,<2",
     "sounddevice>=0.4,<1",

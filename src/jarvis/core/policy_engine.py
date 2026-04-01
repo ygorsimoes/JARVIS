@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 from ..config import JarvisConfig
 from ..models.conversation import RouteDecision, RouteTarget
+from ..observability import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,7 @@ class LLMExecutionPlan:
     requested_target: RouteTarget
     effective_target: RouteTarget
     reason: str
+    fallback_used: bool
 
 
 @dataclass(frozen=True)
@@ -67,16 +71,28 @@ class PolicyEngine:
 
         for i, candidate in enumerate(candidates):
             if await self._candidate_is_available(candidate):
+                fallback_used = i > 0
+                reason = self._selection_reason(
+                    route.target, candidate, used_fallback=fallback_used
+                )
+                logger.info(
+                    "LLM backend selected",
+                    requested_target=route.target.value,
+                    effective_target=candidate.target.value,
+                    backend=candidate.backend_name,
+                    fallback_used=fallback_used,
+                    reason=reason,
+                )
                 return LLMExecutionPlan(
                     adapter=candidate.adapter,
                     backend_name=candidate.backend_name,
                     requested_target=route.target,
                     effective_target=candidate.target,
-                    reason=self._selection_reason(
-                        route.target, candidate, used_fallback=(i > 0)
-                    ),
+                    reason=reason,
+                    fallback_used=fallback_used,
                 )
 
+        logger.error("No LLM backend available", requested_target=route.target.value)
         raise RuntimeError(
             "nenhum backend llm local disponivel para %s" % route.target.value
         )

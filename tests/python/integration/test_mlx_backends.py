@@ -6,6 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from jarvis.adapters.llm.mlx_lm import MLXLMAdapter
@@ -231,6 +232,9 @@ class TestMLXAudioKokoroAdapter:
                 "misaki": ModuleType("misaki"),
                 "num2words": ModuleType("num2words"),
                 "spacy": ModuleType("spacy"),
+                "phonemizer": ModuleType("phonemizer"),
+                "espeakng_loader": ModuleType("espeakng_loader"),
+                "sentencepiece": ModuleType("sentencepiece"),
             },
         ):
             chunks = []
@@ -239,6 +243,38 @@ class TestMLXAudioKokoroAdapter:
 
         assert chunks == [b"audio-bytes"]
         assert fake_model.last_request == ("ola mundo", "pm_santa", "p")
+
+    async def test_synthesize_stream_converts_array_like_audio_to_bytes(self):
+        adapter = MLXAudioKokoroAdapter(
+            model_repo="mlx-community/Kokoro-82M-bf16",
+            voice="pm_santa",
+            lang_code="p",
+        )
+
+        class FakeModel:
+            def generate(self, text, voice, lang_code):
+                del text, voice, lang_code
+                yield types.SimpleNamespace(audio=[0.0, 0.5])
+
+        fake_model = FakeModel()
+        fake_module = types.SimpleNamespace(load_model=lambda model_repo: fake_model)
+        with patch.dict(
+            "sys.modules",
+            {
+                "mlx_audio.tts.utils": fake_module,
+                "misaki": ModuleType("misaki"),
+                "num2words": ModuleType("num2words"),
+                "spacy": ModuleType("spacy"),
+                "phonemizer": ModuleType("phonemizer"),
+                "espeakng_loader": ModuleType("espeakng_loader"),
+                "sentencepiece": ModuleType("sentencepiece"),
+            },
+        ):
+            chunks = []
+            async for chunk in adapter.synthesize_stream("ola mundo"):
+                chunks.append(chunk)
+
+        assert chunks == [np.asarray([0.0, 0.5], dtype=np.float32).tobytes()]
 
 
 @pytest.mark.asyncio

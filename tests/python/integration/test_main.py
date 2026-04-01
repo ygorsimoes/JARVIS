@@ -12,10 +12,12 @@ class TestMainModule:
     def test_build_parser_supports_expected_flags(self):
         parser = main_module.build_parser()
 
-        args = parser.parse_args(["--demo", "oi", "--doctor"])
+        args = parser.parse_args(["--demo", "oi", "--doctor", "--trace"])
 
         assert args.demo == "oi"
         assert args.doctor
+        assert args.trace
+        assert args.trace_jsonl is None
         assert not args.interactive
         assert not args.voice
 
@@ -25,6 +27,8 @@ class TestMainModule:
             interactive=False,
             voice=False,
             doctor=False,
+            trace=False,
+            trace_jsonl=None,
         )
 
         with patch.object(main_module, "build_parser") as build_parser:
@@ -50,6 +54,8 @@ class TestMainModule:
                         interactive=False,
                         voice=False,
                         use_native_backends=True,
+                        trace=False,
+                        trace_jsonl_path=None,
                     )
                 )
 
@@ -74,6 +80,8 @@ class TestMainModule:
                                 interactive=True,
                                 voice=False,
                                 use_native_backends=True,
+                                trace=False,
+                                trace_jsonl_path=None,
                             )
                         )
 
@@ -99,6 +107,8 @@ class TestMainModule:
                             interactive=False,
                             voice=True,
                             use_native_backends=True,
+                            trace=False,
+                            trace_jsonl_path=None,
                         )
                     )
 
@@ -112,6 +122,8 @@ class TestMainModule:
             interactive=False,
             voice=True,
             doctor=False,
+            trace=False,
+            trace_jsonl=None,
         )
 
         def raise_keyboard_interrupt(coro):
@@ -131,6 +143,8 @@ class TestMainModule:
             interactive=False,
             voice=False,
             doctor=True,
+            trace=False,
+            trace_jsonl=None,
         )
         config = JarvisConfig()
         report = types.SimpleNamespace(has_blockers=False)
@@ -148,3 +162,27 @@ class TestMainModule:
 
         run_demo.assert_not_called()
         assert exc_info.value.code == 0
+
+    def test_run_demo_overrides_trace_config(self):
+        runtime = AsyncMock()
+        config = JarvisConfig(_env_file=None)
+
+        with patch("jarvis.main.load_config", return_value=config):
+            with patch(
+                "jarvis.main.JarvisRuntime.from_config", return_value=runtime
+            ) as from_config:
+                result = main_module.asyncio.run(
+                    main_module._run_demo(
+                        prompt=None,
+                        interactive=False,
+                        voice=True,
+                        use_native_backends=True,
+                        trace=True,
+                        trace_jsonl_path="/tmp/jarvis-trace.jsonl",
+                    )
+                )
+
+        assert result is None
+        called_config = from_config.call_args.args[0]
+        assert called_config.trace_mode == "compact"
+        assert called_config.trace_jsonl_path == "/tmp/jarvis-trace.jsonl"

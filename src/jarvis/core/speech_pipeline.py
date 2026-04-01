@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from ..audio.playback import PlaybackBackend
 from ..models.events import Event, EventType
@@ -31,11 +31,15 @@ class SpeechPipeline:
         playback_backend: PlaybackBackend,
         sample_rate_hz: int,
         event_bus=None,
+        event_context: Optional[
+            dict[str, object] | Callable[[], dict[str, object]]
+        ] = None,
     ) -> None:
         self.tts_adapter = tts_adapter
         self.playback_backend = playback_backend
         self.sample_rate_hz = sample_rate_hz
         self.event_bus = event_bus
+        self.event_context = event_context or {}
         self.utterance_id = str(uuid.uuid4())
 
         self._sentence_queue: asyncio.Queue = asyncio.Queue()
@@ -241,4 +245,9 @@ class SpeechPipeline:
     async def _publish(self, event_type: EventType, payload: dict) -> None:
         if self.event_bus is None:
             return
-        await self.event_bus.publish(Event(event_type=event_type, payload=payload))
+        context = (
+            self.event_context() if callable(self.event_context) else self.event_context
+        )
+        enriched = dict(context)
+        enriched.update(payload)
+        await self.event_bus.publish(Event(event_type=event_type, payload=enriched))

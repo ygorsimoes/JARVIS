@@ -18,6 +18,8 @@ class TestJarvisConfig:
         assert config.turn_silence_timeout_ms == 800
         assert config.turn_partial_stability_ms == 250
         assert config.memory_recall_timeout_ms == 50
+        assert config.trace_mode == "off"
+        assert config.trace_jsonl_path is None
 
     def test_string_lists_are_parsed_from_csv(self):
         config = JarvisConfig(

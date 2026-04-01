@@ -15,8 +15,17 @@ async def _run_demo(
     interactive: bool,
     voice: bool,
     use_native_backends: bool,
+    trace: bool = False,
+    trace_jsonl_path: Optional[str] = None,
 ) -> None:
     config = load_config()
+    if trace or trace_jsonl_path is not None:
+        update = {}
+        if trace:
+            update["trace_mode"] = "compact"
+        if trace_jsonl_path is not None:
+            update["trace_jsonl_path"] = trace_jsonl_path
+        config = config.model_copy(update=update)
     configure_logging(config.log_level, config.log_format)
     runtime = JarvisRuntime.from_config(
         config, enable_native_backends=use_native_backends
@@ -61,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--voice", action="store_true", help="inicia o loop foreground de voz"
     )
     parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="exibe tracing tecnico com timestamps durante a execucao",
+    )
+    parser.add_argument(
+        "--trace-jsonl",
+        help="grava tracing tecnico detalhado em um arquivo JSONL",
+    )
+    parser.add_argument(
         "--doctor",
         action="store_true",
         help="valida se o ambiente macOS esta pronto para o runtime real",
@@ -84,6 +102,8 @@ def main() -> None:
                 interactive=args.interactive,
                 voice=args.voice,
                 use_native_backends=True,
+                trace=getattr(args, "trace", False),
+                trace_jsonl_path=getattr(args, "trace_jsonl", None),
             )
         )
     except KeyboardInterrupt:
