@@ -10,6 +10,7 @@ from jarvis.models.conversation import Message, Role
 
 class _BridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    stream_mode = "tool_call_success"
     created_session_payload = None
     response_payload = None
     created_session_count = 0
@@ -21,6 +22,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def reset_state(cls):
+        cls.stream_mode = "tool_call_success"
         cls.created_session_payload = None
         cls.response_payload = None
         cls.created_session_count = 0
@@ -77,40 +79,80 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            initial_events = [
-                {"type": "response_chunk", "text": "Ola "},
-                {
-                    "type": "tool_call",
-                    "name": "system.get_time",
-                    "call_id": "call-123",
-                    "args": {},
-                },
-            ]
-            for event in initial_events:
-                line = "data: %s\n\n" % json.dumps(event)
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
+            if _BridgeHandler.stream_mode == "tool_call_success":
+                initial_events = [
+                    {"type": "response_chunk", "text": "Ola "},
+                    {
+                        "type": "tool_call",
+                        "name": "system.get_time",
+                        "call_id": "call-123",
+                        "args": {},
+                    },
+                ]
+                self._write_events(initial_events)
 
-            if not _BridgeHandler.tool_result_ready.wait(timeout=2):
-                raise RuntimeError("tool result was not submitted")
+                if not _BridgeHandler.tool_result_ready.wait(timeout=2):
+                    raise RuntimeError("tool result was not submitted")
 
-            submitted_payload = _BridgeHandler.submitted_tool_result_payload or {
-                "result": None
-            }
-            trailing_events = [
-                {
-                    "type": "tool_result",
-                    "name": "system.get_time",
-                    "call_id": "call-123",
-                    "result": submitted_payload["result"],
-                },
-                {"type": "response_chunk", "text": "mundo."},
-                {"type": "response_end"},
-            ]
-            for event in trailing_events:
-                line = "data: %s\n\n" % json.dumps(event)
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
+                submitted_payload = _BridgeHandler.submitted_tool_result_payload or {
+                    "result": None
+                }
+                trailing_events = [
+                    {
+                        "type": "tool_result",
+                        "name": "system.get_time",
+                        "call_id": "call-123",
+                        "result": submitted_payload["result"],
+                    },
+                    {"type": "response_chunk", "text": "mundo."},
+                    {"type": "response_end"},
+                ]
+                self._write_events(trailing_events)
+                return
+
+            if _BridgeHandler.stream_mode == "error_event":
+                self._write_events(
+                    [
+                        {"type": "response_chunk", "text": "Ola "},
+                        {"type": "error", "message": "bridge exploded"},
+                    ]
+                )
+                return
+
+            if _BridgeHandler.stream_mode == "missing_call_id":
+                self._write_events(
+                    [
+                        {
+                            "type": "tool_call",
+                            "name": "system.get_time",
+                            "args": {},
+                        }
+                    ]
+                )
+                return
+
+            if _BridgeHandler.stream_mode == "invalid_args":
+                self._write_events(
+                    [
+                        {
+                            "type": "tool_call",
+                            "name": "system.get_time",
+                            "call_id": "call-123",
+                            "args": ["bad"],
+                        }
+                    ]
+                )
+                return
+
+            if _BridgeHandler.stream_mode == "no_tool_call":
+                self._write_events(
+                    [
+                        {"type": "response_chunk", "text": "Sem tool."},
+                        {"type": "response_end"},
+                    ]
+                )
+                return
+
             return
 
         if self.path == "/sessions/session-123/tool-results/call-123":
@@ -146,6 +188,12 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         return
+
+    def _write_events(self, events):
+        for event in events:
+            line = "data: %s\n\n" % json.dumps(event)
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
 
 
 @pytest.mark.asyncio
@@ -285,3 +333,94 @@ class TestFoundationModelsAdapter:
         assert _BridgeHandler.cancelled
         assert _BridgeHandler.deleted
         assert adapter.session_id is None
+
+    async def test_chat_stream_raises_when_bridge_emits_error_event(self):
+        _BridgeHandler.stream_mode = "error_event"
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        with pytest.raises(RuntimeError, match="bridge exploded"):
+            async for _ in adapter.chat_stream(
+                messages=[Message(role=Role.USER, content="Ola")],
+                tools=[],
+                max_kv_size=0,
+            ):
+                pass
+
+    async def test_chat_stream_requires_tool_invoker_for_tool_calls(self):
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="bridge requested tool execution without a tool invoker",
+        ):
+            async for _ in adapter.chat_stream(
+                messages=[Message(role=Role.USER, content="Ola")],
+                tools=[],
+                max_kv_size=0,
+                tool_invoker=None,
+            ):
+                pass
+
+    async def test_chat_stream_rejects_tool_calls_without_call_id(self):
+        _BridgeHandler.stream_mode = "missing_call_id"
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        async def tool_invoker(tool_name, args):
+            return {"tool": tool_name, "args": args}
+
+        with pytest.raises(RuntimeError, match="tool call without call_id"):
+            async for _ in adapter.chat_stream(
+                messages=[Message(role=Role.USER, content="Ola")],
+                tools=[],
+                max_kv_size=0,
+                tool_invoker=tool_invoker,
+            ):
+                pass
+
+    async def test_chat_stream_rejects_non_object_tool_args(self):
+        _BridgeHandler.stream_mode = "invalid_args"
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        async def tool_invoker(tool_name, args):
+            return {"tool": tool_name, "args": args}
+
+        with pytest.raises(RuntimeError, match="tool args that are not an object"):
+            async for _ in adapter.chat_stream(
+                messages=[Message(role=Role.USER, content="Ola")],
+                tools=[],
+                max_kv_size=0,
+                tool_invoker=tool_invoker,
+            ):
+                pass
+
+    async def test_chat_stream_requires_a_user_prompt(self):
+        _BridgeHandler.stream_mode = "no_tool_call"
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="foundation models adapter requires a user prompt",
+        ):
+            async for _ in adapter.chat_stream(
+                messages=[
+                    Message(role=Role.ASSISTANT, content="Sem prompt de usuario")
+                ],
+                tools=[],
+                max_kv_size=0,
+            ):
+                pass

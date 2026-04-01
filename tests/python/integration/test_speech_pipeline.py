@@ -50,6 +50,26 @@ class FakePlaybackBackend:
         self.shutdown_calls += 1
 
 
+class ChunkedFakeTTSAdapter(FakeTTSAdapter):
+    async def synthesize_stream(self, text: str):
+        self.calls.append(text)
+        yield text.encode("utf-8") + b"-chunk-1"
+        yield text.encode("utf-8") + b"-chunk-2"
+
+
+class FailingFakeTTSAdapter(FakeTTSAdapter):
+    async def synthesize_stream(self, text: str):
+        self.calls.append(text)
+        raise RuntimeError("tts exploded")
+        yield text.encode("utf-8")
+
+
+class FailingPlaybackBackend(FakePlaybackBackend):
+    async def play(self, audio_bytes: bytes, sample_rate_hz: int) -> None:
+        await super().play(audio_bytes, sample_rate_hz)
+        raise RuntimeError("playback exploded")
+
+
 @pytest.mark.asyncio
 class TestSpeechPipeline:
     async def test_pipeline_synthesizes_and_plays_in_order(self):
@@ -99,3 +119,51 @@ class TestSpeechPipeline:
         await pipeline.shutdown()
 
         assert playback.shutdown_calls == 1
+
+    async def test_pipeline_plays_multiple_chunks_in_order_for_one_sentence(self):
+        bus = EventBus()
+        subscription = await bus.subscribe(
+            [EventType.PLAYBACK_STARTED, EventType.PLAYBACK_COMPLETED]
+        )
+        tts = ChunkedFakeTTSAdapter()
+        playback = FakePlaybackBackend()
+        pipeline = SpeechPipeline(tts, playback, sample_rate_hz=24000, event_bus=bus)
+
+        await pipeline.enqueue_sentence(0, "Primeira frase.")
+        await pipeline.finish()
+
+        assert tts.calls == ["Primeira frase."]
+        assert playback.played == [
+            (b"Primeira frase.-chunk-1", 24000),
+            (b"Primeira frase.-chunk-2", 24000),
+        ]
+        started_event = await subscription.get()
+        completed_event = await subscription.get()
+        assert started_event.event_type == EventType.PLAYBACK_STARTED
+        assert completed_event.event_type == EventType.PLAYBACK_COMPLETED
+        assert started_event.payload["index"] == 0
+        assert completed_event.payload["index"] == 0
+
+    async def test_pipeline_finish_propagates_tts_errors(self):
+        tts = FailingFakeTTSAdapter()
+        playback = FakePlaybackBackend()
+        pipeline = SpeechPipeline(tts, playback, sample_rate_hz=24000)
+
+        await pipeline.enqueue_sentence(0, "Frase com erro.")
+
+        with pytest.raises(RuntimeError, match="tts exploded"):
+            await pipeline.finish()
+
+        assert playback.played == []
+
+    async def test_pipeline_finish_propagates_playback_errors(self):
+        tts = FakeTTSAdapter()
+        playback = FailingPlaybackBackend()
+        pipeline = SpeechPipeline(tts, playback, sample_rate_hz=24000)
+
+        await pipeline.enqueue_sentence(0, "Frase com playback falho.")
+
+        with pytest.raises(RuntimeError, match="playback exploded"):
+            await pipeline.finish()
+
+        assert playback.played == [(b"Frase com playback falho.-audio", 24000)]

@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 uv sync
 
+if ! command -v swiftlint >/dev/null 2>&1; then
+  echo "swiftlint nao encontrado. Instale com: brew install swiftlint" >&2
+  exit 1
+fi
+
+swiftlint lint --config "$ROOT_DIR/.swiftlint.yml"
+
 if [[ ! -f "$ROOT_DIR/.env" ]]; then
   cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
 fi

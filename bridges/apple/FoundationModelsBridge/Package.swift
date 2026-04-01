@@ -38,6 +38,7 @@ let package = Package(
             name: "FoundationModelsBridgeCoreTests",
             dependencies: [
                 "FoundationModelsBridgeCore",
+                "FoundationModelsBridge",
                 .product(name: "Testing", package: "swift-testing"),
             ],
             path: "Tests/FoundationModelsBridgeCoreTests"

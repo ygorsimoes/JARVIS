@@ -30,10 +30,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
       - name: Show toolchain versions
         run: |
           xcodebuild -version
           swift --version
+
+      - name: Run SwiftLint
+        run: swiftlint lint --config .swiftlint.yml --reporter github-actions-logging
 
       - name: Resolve package dependencies
         working-directory: ${{ matrix.package_path }}

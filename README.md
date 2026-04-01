@@ -18,6 +18,7 @@ Assistente local-first, macOS-first, com control-plane em Python e bridges nativ
 - `Xcode Command Line Tools`
 - `ffmpeg`
 - `espeak-ng`
+- `swiftlint`
 
 ### Bootstrap
 
@@ -30,6 +31,7 @@ Se quiser fazer manualmente:
 ```bash
 uv sync
 cp .env.example .env
+swiftlint lint --config .swiftlint.yml
 swift build -c release --package-path bridges/apple/SpeechAnalyzerCLI
 swift build -c release --package-path bridges/apple/FoundationModelsBridge
 ```
@@ -79,6 +81,7 @@ uv run pytest tests/python
 Somente Swift:
 
 ```bash
+swiftlint lint --config .swiftlint.yml
 swift test --package-path bridges/apple/SpeechAnalyzerCLI
 swift test --package-path bridges/apple/FoundationModelsBridge
 ```

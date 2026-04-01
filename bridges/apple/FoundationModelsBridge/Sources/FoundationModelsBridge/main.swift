@@ -7,7 +7,6 @@ import Logging
 import FoundationModels
 #endif
 
-
 private func makeFoundationModelsLogger() -> Logger {
     var logger = Logger(label: "jarvis.bridge.foundation_models")
     logger[metadataKey: "bridge"] = "foundation_models"
@@ -56,7 +55,8 @@ actor ToolInvocationCoordinator {
             )
         )
 
-        let result = try await withCheckedThrowingContinuation { (toolContinuation: CheckedContinuation<JSONValue, Error>) in
+        let result = try await withCheckedThrowingContinuation {
+            (toolContinuation: CheckedContinuation<JSONValue, Error>) in
             self.pendingCalls[callID] = toolContinuation
         }
 
@@ -388,34 +388,62 @@ struct FoundationModelsHTTPServer: Sendable {
         }
 
         router.post("/sessions/:sessionID/cancel") { request, _ in
-            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(from: request.uri.path, suffix: "/cancel")
+            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(
+                from: request.uri.path,
+                suffix: "/cancel"
+            )
             guard let session = await self.sessionStore.get(sessionID) else {
-                return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
+                return try errorResponse(
+                    status: .notFound,
+                    message: BridgeError.missingSession(sessionID).localizedDescription
+                )
             }
             let cancelled = await session.cancelActiveResponse()
             return try encodeJSONResponse(["cancelled": cancelled])
         }
 
         router.post("/sessions/:sessionID/tool-results/:callID") { request, _ in
-            let (sessionID, callID) = try FoundationModelsBridgeSupport.extractSessionIDAndCallID(from: request.uri.path)
+            let (sessionID, callID) = try FoundationModelsBridgeSupport
+                .extractSessionIDAndCallID(from: request.uri.path)
             guard let session = await self.sessionStore.get(sessionID) else {
-                return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
+                return try errorResponse(
+                    status: .notFound,
+                    message: BridgeError.missingSession(sessionID).localizedDescription
+                )
             }
-            let payload: ToolResultSubmitRequest = try await decodeBody(request, as: ToolResultSubmitRequest.self)
-            let accepted = await session.submitToolResult(callID: callID, result: payload.result)
+            let payload: ToolResultSubmitRequest = try await decodeBody(
+                request,
+                as: ToolResultSubmitRequest.self
+            )
+            let accepted = await session.submitToolResult(
+                callID: callID,
+                result: payload.result
+            )
             if !accepted {
-                return try errorResponse(status: .notFound, message: "Tool call not found: \(callID)")
+                return try errorResponse(
+                    status: .notFound,
+                    message: "Tool call not found: \(callID)"
+                )
             }
             return try encodeJSONResponse(["accepted": true])
         }
 
         router.post("/sessions/:sessionID/responses") { request, _ in
-            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(from: request.uri.path, suffix: "/responses")
+            let sessionID = try FoundationModelsBridgeSupport.extractSessionID(
+                from: request.uri.path,
+                suffix: "/responses"
+            )
             guard let session = await self.sessionStore.get(sessionID) else {
-                return try errorResponse(status: .notFound, message: BridgeError.missingSession(sessionID).localizedDescription)
+                return try errorResponse(
+                    status: .notFound,
+                    message: BridgeError.missingSession(sessionID).localizedDescription
+                )
             }
 
-            let payload: SessionResponseRequest = try await decodeBody(request, as: SessionResponseRequest.self)
+            let payload: SessionResponseRequest = try await decodeBody(
+                request,
+                as: SessionResponseRequest.self
+            )
             let isStreaming = payload.stream ?? true
             if isStreaming {
                 return try await self.handleStreamingRequest(session: session, payload: payload)

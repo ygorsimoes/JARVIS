@@ -29,4 +29,5 @@ swift test --package-path bridges/apple/FoundationModelsBridge
 ```bash
 uv run ruff check .
 uv run ruff format --check .
+swiftlint lint --config .swiftlint.yml
 ```

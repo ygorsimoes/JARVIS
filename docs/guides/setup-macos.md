@@ -8,12 +8,14 @@
 - `Xcode Command Line Tools`
 - `ffmpeg`
 - `espeak-ng`
+- `swiftlint`
 
 ## Instalação
 
 ```bash
 uv sync
 cp .env.example .env
+swiftlint lint --config .swiftlint.yml
 swift build -c release --package-path bridges/apple/SpeechAnalyzerCLI
 swift build -c release --package-path bridges/apple/FoundationModelsBridge
 ```

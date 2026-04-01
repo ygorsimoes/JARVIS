@@ -66,6 +66,67 @@ class TestSpeechAnalyzerAdapter:
 
         assert "model_not_ready" in str(context.value)
 
+    async def test_iter_events_rejects_non_object_payloads(self):
+        script = self._make_script(
+            """
+            import json
+            import sys
+
+            sys.stdout.write(json.dumps(["not", "an", "object"]) + "\\n")
+            sys.stdout.flush()
+            """
+        )
+
+        adapter = SpeechAnalyzerSTTAdapter(script, locale="pt-BR")
+        with pytest.raises(
+            SpeechAnalyzerStreamError,
+            match="invalid event payload",
+        ):
+            async for _ in adapter.iter_events():
+                pass
+
+    async def test_transcribe_stream_yields_only_final_transcripts(self):
+        script = self._make_script(
+            """
+            import json
+            import sys
+
+            events = [
+                {"type": "ready", "locale": "pt-BR", "sample_rate": 16000},
+                {"type": "partial_transcript", "text": "que horas"},
+                {"type": "final_transcript", "text": "Que horas sao agora?"},
+                {"type": "final_transcript", "text": "Define um timer de dez minutos"},
+            ]
+            for event in events:
+                sys.stdout.write(json.dumps(event) + "\\n")
+                sys.stdout.flush()
+            """
+        )
+
+        adapter = SpeechAnalyzerSTTAdapter(script, locale="pt-BR")
+
+        transcripts = [text async for text in adapter.transcribe_stream()]
+
+        assert transcripts == [
+            "Que horas sao agora?",
+            "Define um timer de dez minutos",
+        ]
+
+    async def test_iter_events_uses_default_error_summary_without_stderr(self):
+        script = self._make_script(
+            """
+            raise SystemExit(3)
+            """
+        )
+
+        adapter = SpeechAnalyzerSTTAdapter(script, locale="pt-BR")
+        with pytest.raises(
+            SpeechAnalyzerStreamError,
+            match="failed without stderr output",
+        ):
+            async for _ in adapter.iter_events():
+                pass
+
     def _make_script(self, body: str) -> str:
         temp_dir = tempfile.mkdtemp(prefix="jarvis-stt-test-")
         path = os.path.join(temp_dir, "fake_cli.py")

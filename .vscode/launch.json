@@ -59,6 +59,26 @@
             "target": "foundation-models-bridge",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release foundation-models-bridge (bridges/apple/FoundationModelsBridge)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/bridges/apple/SpeechAnalyzerCLI",
+            "name": "Debug speechanalyzer-cli (bridges/apple/SpeechAnalyzerCLI)",
+            "target": "speechanalyzer-cli",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug speechanalyzer-cli (bridges/apple/SpeechAnalyzerCLI)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/bridges/apple/SpeechAnalyzerCLI",
+            "name": "Release speechanalyzer-cli (bridges/apple/SpeechAnalyzerCLI)",
+            "target": "speechanalyzer-cli",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release speechanalyzer-cli (bridges/apple/SpeechAnalyzerCLI)"
         }
     ]
 }

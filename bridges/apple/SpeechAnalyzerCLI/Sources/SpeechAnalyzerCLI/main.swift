@@ -5,7 +5,6 @@ import SpeechAnalyzerCore
 import Darwin
 import Logging
 
-
 private func makeSpeechAnalyzerLogger() -> Logger {
     var logger = Logger(label: "jarvis.bridge.speech_analyzer")
     logger[metadataKey: "bridge"] = "speech_analyzer"
