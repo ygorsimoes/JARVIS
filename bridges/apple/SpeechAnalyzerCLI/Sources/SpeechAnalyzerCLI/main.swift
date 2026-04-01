@@ -149,29 +149,36 @@ struct SpeechAnalyzerCLI {
             throw CLIError.unsupportedOS
         }
 
-        guard SpeechTranscriber.isAvailable else {
-            throw CLIError.speechTranscriberUnavailable
-        }
-
         let locale = Locale(identifier: options.locale)
-        let supportedLocales = await SpeechTranscriber.supportedLocales
-        guard supportedLocales.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
-            throw CLIError.unsupportedLocale(locale.identifier(.bcp47))
+        if !options.vadOnly {
+            guard SpeechTranscriber.isAvailable else {
+                throw CLIError.speechTranscriberUnavailable
+            }
+
+            let supportedLocales = await SpeechTranscriber.supportedLocales
+            guard supportedLocales.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+                throw CLIError.unsupportedLocale(locale.identifier(.bcp47))
+            }
         }
 
         let detector = SpeechDetector(
             detectionOptions: .init(sensitivityLevel: .medium),
             reportResults: true
         )
-        let transcriber = SpeechTranscriber(
+        let transcriber = options.vadOnly ? nil : SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
             reportingOptions: [.volatileResults, .fastResults],
             attributeOptions: []
         )
-        let modules: [any SpeechModule] = [detector, transcriber]
+        var modules: [any SpeechModule] = [detector]
+        if let transcriber {
+            modules.append(transcriber)
+        }
 
-        try await ensureAssets(locale: locale, modules: modules)
+        if !options.vadOnly {
+            try await ensureAssets(locale: locale, modules: modules)
+        }
 
         guard let targetFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules) else {
             throw CLIError.noCompatibleAudioFormat
@@ -199,11 +206,15 @@ struct SpeechAnalyzerCLI {
             ]
         )
 
-        async let transcriberTask: Void = monitorTranscriber(transcriber, emitter: emitter)
         async let detectorTask: Void = monitorDetector(detector, emitter: emitter)
 
         do {
-            _ = try await (transcriberTask, detectorTask)
+            if let transcriber {
+                async let transcriberTask: Void = monitorTranscriber(transcriber, emitter: emitter)
+                _ = try await (transcriberTask, detectorTask)
+            } else {
+                try await detectorTask
+            }
         } catch let cancellation as CancellationError {
             capture.stop()
             try? await analyzer.finalizeAndFinishThroughEndOfInput()

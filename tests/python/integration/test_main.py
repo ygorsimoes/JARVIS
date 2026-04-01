@@ -106,6 +106,25 @@ class TestMainModule:
         runtime.run_voice_foreground.assert_awaited_once()
         runtime.shutdown.assert_awaited_once()
 
+    def test_main_swallows_keyboard_interrupt_from_asyncio_run(self):
+        parsed_args = argparse.Namespace(
+            demo=None,
+            interactive=False,
+            voice=True,
+            doctor=False,
+        )
+
+        def raise_keyboard_interrupt(coro):
+            coro.close()
+            raise KeyboardInterrupt
+
+        with patch.object(main_module, "build_parser") as build_parser:
+            with patch("jarvis.main.asyncio.run", side_effect=raise_keyboard_interrupt):
+                build_parser.return_value.parse_args.return_value = parsed_args
+                result = main_module.main()
+
+        assert result is None
+
     def test_main_runs_doctor_and_exits_with_success_when_no_blockers(self):
         parsed_args = argparse.Namespace(
             demo=None,

@@ -77,14 +77,17 @@ def main() -> None:
         report = asyncio.run(run_doctor(config))
         raise SystemExit(1 if report.has_blockers else 0)
 
-    asyncio.run(
-        _run_demo(
-            prompt=args.demo,
-            interactive=args.interactive,
-            voice=args.voice,
-            use_native_backends=True,
+    try:
+        asyncio.run(
+            _run_demo(
+                prompt=args.demo,
+                interactive=args.interactive,
+                voice=args.voice,
+                use_native_backends=True,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        return
 
 
 if __name__ == "__main__":

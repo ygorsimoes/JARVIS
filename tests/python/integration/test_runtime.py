@@ -19,8 +19,10 @@ from jarvis.runtime import JarvisRuntime, VoiceCaptureError
 class FakeActivationAdapter:
     def __init__(self, responses):
         self._responses = list(responses)
+        self.calls = 0
 
     async def listen(self) -> bool:
+        self.calls += 1
         return self._responses.pop(0)
 
 
@@ -70,6 +72,21 @@ class FakeSTTAdapter:
         session_events = self.events
         self.events = []  # O watcher não ver eventos
         return FakeSTTSession(session_events)
+
+
+class SequencedSTTAdapter:
+    def __init__(self, live_sessions, vad_sessions=None, vad_delay_s: float = 0.0):
+        self.live_sessions = [list(events) for events in live_sessions]
+        self.vad_sessions = [list(events) for events in (vad_sessions or [])]
+        self.vad_delay_s = vad_delay_s
+
+    async def start_live_session(self):
+        return FakeSTTSession(self.live_sessions.pop(0))
+
+    async def start_vad_session(self):
+        if not self.vad_sessions:
+            return FakeSTTSession([])
+        return DelayedSTTSession(self.vad_sessions.pop(0), self.vad_delay_s)
 
 
 class DelayedSTTAdapter(FakeSTTAdapter):
@@ -173,7 +190,7 @@ class TestRuntime:
     @pytest_asyncio.fixture(autouse=True)
     async def _runtime(self):
         self.runtime = JarvisRuntime.from_config(
-            JarvisConfig(allowed_file_roots=["/tmp"]),
+            JarvisConfig(_env_file=None, allowed_file_roots=["/tmp"]),
             enable_native_backends=False,
         )
         yield
@@ -208,7 +225,7 @@ class TestRuntime:
         with patch("webbrowser.open", return_value=True):
             response = await self.runtime.respond_text("Pesquise arquitetura hexagonal")
         assert response.route.tool_name == "browser.search"
-        assert "Busca aberta" in response.full_text
+        assert "Abri a busca" in response.full_text
 
     async def test_runtime_recovers_to_idle_after_error(self):
         with pytest.raises(ValueError):
@@ -327,6 +344,47 @@ class TestRuntime:
         assert any(line.startswith("voce~>") for line in printed_lines)
         assert any(line.startswith("voce>") for line in printed_lines)
 
+    async def test_run_voice_foreground_reuses_activation_after_barge_in(self):
+        activation = FakeActivationAdapter([True])
+        self.runtime.activation_adapter = activation
+        self.runtime.stt_adapter = SequencedSTTAdapter(
+            live_sessions=[
+                [
+                    {"type": "speech_started"},
+                    {"type": "partial_transcript", "text": "me lembra do resumo"},
+                    {"type": "speech_ended"},
+                    {"type": "final_transcript", "text": "Me lembra do resumo"},
+                ],
+                [
+                    {"type": "speech_started"},
+                    {"type": "partial_transcript", "text": "que horas sao"},
+                    {"type": "speech_ended"},
+                    {"type": "final_transcript", "text": "Que horas sao agora?"},
+                ],
+            ],
+            vad_sessions=[
+                [
+                    {"type": "other_event"},
+                    {"type": "speech_started"},
+                ]
+            ],
+            vad_delay_s=0.05,
+        )
+        self.runtime.hot_path_adapter = SlowHotPathAdapter()
+        self.runtime.playback_backend = FakePlaybackBackend()
+
+        with patch("builtins.print") as print_mock:
+            await self.runtime.run_voice_foreground(turn_limit=1)
+
+        printed_lines = [call.args[0] for call in print_mock.call_args_list]
+        assert activation.calls == 1
+        assert self.runtime.hot_path_adapter.cancelled
+        assert sum(1 for line in printed_lines if line.startswith("voce>")) == 2
+        assert any(
+            "Agora sao" in line for line in printed_lines if line.startswith("jarvis>")
+        )
+        assert self.runtime.state_machine.state == JarvisState.IDLE
+
     async def test_run_voice_foreground_reports_capture_failures_without_traceback(
         self,
     ):
@@ -423,9 +481,7 @@ class TestRuntime:
         await self.runtime.respond_text("Me lembra do resumo")
 
         memory_system = cast(Any, self.runtime.memory_system)
-        assert memory_system.calls == [
-            ("Me lembra do resumo", RouteTarget.HOT_PATH, None)
-        ]
+        assert memory_system.calls == [("Me lembra do resumo", RouteTarget.HOT_PATH, 2)]
         memory_messages = [
             message.content
             for message in (self.runtime.hot_path_adapter.messages or [])
@@ -461,9 +517,14 @@ class TestRuntime:
         assert memory_system.calls == [
             (
                 "Analisa esse erro e explica por que ele quebra",
+                RouteTarget.HOT_PATH,
+                2,
+            ),
+            (
+                "Analisa esse erro e explica por que ele quebra",
                 RouteTarget.DELIBERATIVE,
                 None,
-            )
+            ),
         ]
         memory_messages = [
             message.content

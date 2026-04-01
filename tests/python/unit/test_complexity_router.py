@@ -32,6 +32,11 @@ class TestComplexityRouter:
         decision = self.router.route("Me lembra do contexto", recalled_memories=2)
         assert decision.target == RouteTarget.DELIBERATIVE
 
+    def test_direct_tool_keeps_priority_over_memory_hits(self):
+        decision = self.router.route("Que horas sao agora?", recalled_memories=2)
+        assert decision.target == RouteTarget.DIRECT_TOOL
+        assert decision.tool_name == "system.get_time"
+
     def test_routes_tool_chain_depth_to_deliberative(self):
         decision = self.router.route("Abre o Safari", tool_chain_depth=2)
         assert decision.target == RouteTarget.DELIBERATIVE

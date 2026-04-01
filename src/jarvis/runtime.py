@@ -4,6 +4,7 @@ import asyncio
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, Callable, Iterable, List, Optional
 
@@ -150,6 +151,7 @@ class JarvisRuntime:
         self.memory_system: Optional[MemorySystem] = memory_system
         self._active_turn: ActiveTurnExecution | None = None
         self._pending_voice_pipeline: SpeechPipeline | None = None
+        self._pending_voice_relisten = False
 
     @classmethod
     def from_config(
@@ -234,10 +236,14 @@ class JarvisRuntime:
 
     async def run_voice_foreground(self, turn_limit: Optional[int] = None) -> None:
         handled_turns = 0
+        carry_activation = False
         while turn_limit is None or handled_turns < turn_limit:
-            activated = await self.activation_adapter.listen()
-            if not activated:
-                continue
+            handoff_capture = carry_activation
+            carry_activation = False
+            if not handoff_capture:
+                activated = await self.activation_adapter.listen()
+                if not activated:
+                    continue
 
             partial_state = {"text": "", "printed": False}
 
@@ -254,7 +260,7 @@ class JarvisRuntime:
 
             await self._publish_event(
                 EventType.ACTIVATION_TRIGGERED,
-                {"source": "foreground"},
+                {"source": "barge_in_handoff" if handoff_capture else "foreground"},
                 mode="voice",
                 backend=self.activation_backend_name,
             )
@@ -267,6 +273,8 @@ class JarvisRuntime:
                 if partial_state["printed"] and sys.stdout.isatty():
                     print("", flush=True)
                 print("jarvis> %s" % exc)
+                if handoff_capture:
+                    continue
                 handled_turns += 1
                 continue
             if partial_state["printed"] and sys.stdout.isatty():
@@ -292,7 +300,7 @@ class JarvisRuntime:
                 name="jarvis-voice-response",
             )
             barge_in_task = asyncio.create_task(
-                self._barge_in_watcher(response_task, pipeline),
+                self._barge_in_watcher(response_task),
                 name="jarvis-barge-in-watcher",
             )
             try:
@@ -309,37 +317,42 @@ class JarvisRuntime:
                 self._pending_voice_pipeline = None
                 if not response_task.done():
                     response_task.cancel()
-                    try:
-                        await response_task
-                    except asyncio.CancelledError:
-                        pass
+                try:
+                    await response_task
+                except asyncio.CancelledError:
+                    pass
                 if not barge_in_task.done():
                     barge_in_task.cancel()
-                    try:
-                        await barge_in_task
-                    except asyncio.CancelledError:
-                        pass
+                try:
+                    await barge_in_task
+                except asyncio.CancelledError:
+                    pass
                 await pipeline.shutdown()
+            if self._consume_pending_voice_relisten():
+                carry_activation = True
+                continue
             handled_turns += 1
 
     async def _barge_in_watcher(
         self,
         response_task: asyncio.Task,
-        pipeline: SpeechPipeline,
+        pipeline: SpeechPipeline | None = None,
     ) -> None:
         """Monitora o VAD em paralelo durante SPEAKING/THINKING.
         Cancela response_task ao detectar fala."""
-        session = await self.stt_adapter.start_live_session()
+        del pipeline
         try:
-            async for event in session.iter_events():
+            async for event in self._iter_barge_in_events():
                 if response_task.done():
                     return
                 classified = self.vad_adapter.classify_event(event)
                 if classified and classified["speech_detected"]:
                     await self.interrupt_current_turn(reason="barge-in")
                     return
-        finally:
-            await session.stop()
+        except SpeechAnalyzerStreamError:
+            # O watcher de barge-in eh auxiliar: se o bridge cair ou o binario
+            # nao suportar o modo reduzido, preservamos o turno atual.
+            return
 
     async def capture_voice_turn(
         self,
@@ -578,6 +591,8 @@ class JarvisRuntime:
             return True
 
         execution.interrupted = True
+        if execution.mode == "voice" and reason == "barge-in":
+            self._pending_voice_relisten = True
         await self._publish_event(
             EventType.INTERRUPTION_REQUESTED,
             {"reason": reason},
@@ -644,21 +659,45 @@ class JarvisRuntime:
         explicit_recalled_memories = (
             list(recalled_memories) if recalled_memories is not None else None
         )
-        route = self.router.route(
+        initial_route = self.router.route(
             text,
             recalled_memories=len(explicit_recalled_memories or []),
             recent_turns=len(self.dialogue_manager.working_memory),
         )
+        pre_routed_memories: list[Memory] = []
+        if (
+            explicit_recalled_memories is None
+            and self.memory_system is not None
+            and initial_route.target != RouteTarget.DIRECT_TOOL
+        ):
+            pre_routed_memories = await self._recall_with_budget(
+                text,
+                RouteTarget.HOT_PATH,
+                top_k=2,
+            )
+        route = initial_route
+        if pre_routed_memories:
+            route = self.router.route(
+                text,
+                recalled_memories=len(
+                    explicit_recalled_memories or pre_routed_memories
+                ),
+                recent_turns=len(self.dialogue_manager.working_memory),
+            )
 
         if (
             explicit_recalled_memories is None
             and self.memory_system is not None
             and route.target != RouteTarget.DIRECT_TOOL
         ):
-            explicit_recalled_memories = await self.memory_system.recall(
-                text,
-                route.target,
-            )
+            if route.target == RouteTarget.HOT_PATH and pre_routed_memories:
+                explicit_recalled_memories = pre_routed_memories
+            else:
+                explicit_recalled_memories = await self._recall_with_budget(
+                    text,
+                    route.target,
+                    fallback=pre_routed_memories,
+                )
         recalled_memories = list(explicit_recalled_memories or [])
 
         llm_plan = None
@@ -847,6 +886,62 @@ class JarvisRuntime:
         await self.state_machine.force_transition(
             JarvisState.IDLE, "interruption handled"
         )
+
+    async def _iter_barge_in_events(self) -> AsyncIterator[dict]:
+        start_vad_session = getattr(self.stt_adapter, "start_vad_session", None)
+        if start_vad_session is not None:
+            try:
+                async for event in self._iter_session_events(start_vad_session):
+                    yield event
+                return
+            except SpeechAnalyzerStreamError as exc:
+                if not self._is_unsupported_vad_only_error(exc):
+                    raise
+
+        async for event in self._iter_session_events(
+            self.stt_adapter.start_live_session
+        ):
+            yield event
+
+    async def _iter_session_events(self, start_session) -> AsyncIterator[dict]:
+        session = await start_session()
+        try:
+            async for event in session.iter_events():
+                yield event
+        finally:
+            await session.stop()
+
+    @staticmethod
+    def _is_unsupported_vad_only_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "invalid_arguments" in message or "usage:" in message
+
+    async def _recall_with_budget(
+        self,
+        query: str,
+        route_target: RouteTarget,
+        *,
+        top_k: int | None = None,
+        fallback: Iterable[Memory] | None = None,
+    ) -> list[Memory]:
+        if self.memory_system is None or route_target == RouteTarget.DIRECT_TOOL:
+            return list(fallback or [])
+
+        timeout_s = self.config.memory_recall_timeout_ms / 1000.0
+        try:
+            if timeout_s <= 0:
+                return await self.memory_system.recall(query, route_target, top_k=top_k)
+            return await asyncio.wait_for(
+                self.memory_system.recall(query, route_target, top_k=top_k),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return list(fallback or [])
+
+    def _consume_pending_voice_relisten(self) -> bool:
+        pending = self._pending_voice_relisten
+        self._pending_voice_relisten = False
+        return pending
 
     async def _pump_turn_chunks_to_queue(
         self,
@@ -1038,30 +1133,58 @@ class JarvisRuntime:
         if tool_name == "system.get_time":
             return "Agora sao %s." % output["time"]
         if tool_name == "system.set_volume":
-            return "Volume ajustado para %d." % output["volume"]
+            return "Confirmado. Volume em %d por cento." % output["volume"]
         if tool_name == "timer.start":
             duration_seconds = int(output["duration_seconds"])
-            minutes = duration_seconds // 60
-            if minutes and duration_seconds % 60 == 0:
-                return "Timer definido para %d minutos." % minutes
-            return "Timer definido para %d segundos." % duration_seconds
+            return "Confirmado. Timer para %s." % JarvisRuntime._format_duration(
+                duration_seconds
+            )
         if tool_name == "timer.list":
             count = len(output)
-            return "Existem %d timers ativos." % count
+            if count == 0:
+                return "Nao ha timers ativos."
+            nearest = output[0]
+            remaining = int(nearest.get("remaining_seconds", 0))
+            label = str(nearest.get("label") or "Timer")
+            if count == 1:
+                return "Ha 1 timer ativo. %s termina em %s." % (
+                    label,
+                    JarvisRuntime._format_duration(remaining),
+                )
+            return "Ha %d timers ativos. O mais proximo, %s, termina em %s." % (
+                count,
+                label,
+                JarvisRuntime._format_duration(remaining),
+            )
         if tool_name == "timer.cancel":
             if output.get("cancelled"):
-                return "Timer cancelado."
-            return "Nao encontrei esse timer para cancelar."
+                return "Confirmado. Timer cancelado."
+            return "Nao encontrei esse timer."
         if tool_name == "browser.search":
-            return "Busca aberta para %s." % output["query"]
+            return "Abri a busca por %s." % output["query"]
         if tool_name == "browser.fetch_url":
             if output.get("status") == "success":
-                return "Conteudo carregado de %s." % output["url"]
+                return "Carreguei o conteudo de %s." % output["url"]
             return "Nao consegui carregar a URL informada."
         if tool_name == "calendar.list_events":
-            return "Encontrei %d eventos." % output.get("count", 0)
+            if output.get("status") == "error":
+                return "Nao consegui consultar seu calendario."
+            count = int(output.get("count", 0))
+            if count <= 0:
+                return "Nao encontrei eventos no periodo consultado."
+            events = output.get("events") or []
+            first_event = events[0] if events else {}
+            title = str(first_event.get("title") or "Sem titulo")
+            start = JarvisRuntime._format_calendar_start(first_event.get("start"))
+            if count == 1:
+                return "Encontrei 1 evento. O proximo e %s%s." % (title, start)
+            return "Encontrei %d eventos. O proximo e %s%s." % (
+                count,
+                title,
+                start,
+            )
         if tool_name == "system.open_app":
-            return "%s aberto." % output["app_name"]
+            return "Confirmado. Abri o %s." % output["app_name"]
         return str(output)
 
     @staticmethod
@@ -1072,6 +1195,41 @@ class JarvisRuntime:
                 ", ".join(exc.side_effects),
             )
         return "Preciso da sua confirmacao para executar %s." % exc.tool_name
+
+    @staticmethod
+    def _format_duration(duration_seconds: int) -> str:
+        duration_seconds = max(0, int(duration_seconds))
+        hours, remainder = divmod(duration_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts: list[str] = []
+        if hours:
+            parts.append("%d hora%s" % (hours, "s" if hours != 1 else ""))
+        if minutes:
+            parts.append("%d minuto%s" % (minutes, "s" if minutes != 1 else ""))
+        if seconds and not hours:
+            parts.append("%d segundo%s" % (seconds, "s" if seconds != 1 else ""))
+        if not parts:
+            return "menos de 1 segundo"
+        if len(parts) == 1:
+            return parts[0]
+        return "%s e %s" % (", ".join(parts[:-1]), parts[-1])
+
+    @staticmethod
+    def _format_calendar_start(value: object) -> str:
+        if not value:
+            return ""
+        raw = str(value).strip()
+        formats = (
+            "%Y-%m-%d %H:%M:%S %z",
+            "%Y-%m-%d %H:%M:%S",
+        )
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                return " as %s" % parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+        return " em %s" % raw
 
     def _set_active_turn_context(
         self, route: RouteDecision, backend_name: Optional[str]

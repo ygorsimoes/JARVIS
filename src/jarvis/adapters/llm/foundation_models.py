@@ -58,7 +58,7 @@ class FoundationModelsBridgeAdapter:
             response = await asyncio.to_thread(self._open_request, request)
             await asyncio.to_thread(response.read)
             await asyncio.to_thread(response.close)
-        except urllib.error.URLError:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
         finally:
             self.session_id = None
@@ -74,9 +74,12 @@ class FoundationModelsBridgeAdapter:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        response = await asyncio.to_thread(self._open_request, request)
-        body = await asyncio.to_thread(response.read)
-        await asyncio.to_thread(response.close)
+        try:
+            response = await asyncio.to_thread(self._open_request, request)
+            body = await asyncio.to_thread(response.read)
+            await asyncio.to_thread(response.close)
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return False
         payload = json.loads(body.decode("utf-8"))
         return bool(payload.get("cancelled"))
 
@@ -87,9 +90,11 @@ class FoundationModelsBridgeAdapter:
             and self._owns_process
             and self._process.returncode is None
         ):
-            self._process.terminate()
             try:
+                self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=2.0)
+            except ProcessLookupError:
+                pass
             except asyncio.TimeoutError:
                 self._process.kill()
                 await self._process.wait()
@@ -104,7 +109,8 @@ class FoundationModelsBridgeAdapter:
         self._owns_process = False
 
     async def healthcheck(self) -> bool:
-        if await self._raw_healthcheck():
+        health = await self._service_health()
+        if health is not None and health["available"]:
             return True
         if not self.bridge_binary_path:
             return False
@@ -112,19 +118,38 @@ class FoundationModelsBridgeAdapter:
             await self._ensure_service_running()
         except RuntimeError:
             return False
-        return await self._raw_healthcheck()
+        health = await self._service_health()
+        return bool(health and health["available"])
 
-    async def _raw_healthcheck(self) -> bool:
+    async def _service_health(self) -> dict[str, object] | None:
         request = urllib.request.Request("%s/health" % self.base_url, method="GET")
         try:
             response = await asyncio.to_thread(self._open_request, request)
-            if getattr(response, "status", 200) != 200:
-                await asyncio.to_thread(response.close)
-                return False
+            status_code = getattr(response, "status", 200)
+            body = await asyncio.to_thread(response.read)
             await asyncio.to_thread(response.close)
-            return True
+        except urllib.error.HTTPError as exc:
+            status_code = exc.code
+            body = exc.read()
+            exc.close()
         except (urllib.error.URLError, TimeoutError):
-            return False
+            return None
+
+        payload: dict[str, object] = {}
+        if body:
+            try:
+                decoded = json.loads(body.decode("utf-8"))
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except json.JSONDecodeError:
+                payload = {}
+
+        return {
+            "status_code": status_code,
+            "payload": payload,
+            "available": payload.get("status") == "ok"
+            and payload.get("availability") == "available",
+        }
 
     async def chat_stream(
         self,
@@ -136,14 +161,10 @@ class FoundationModelsBridgeAdapter:
         del max_kv_size
         await self._ensure_service_running()
         session_created = await self._ensure_session(tools)
-        prompt = self._last_user_message(messages)
+        prompt = self._bridge_prompt(messages, include_history=session_created)
         if not prompt:
             raise RuntimeError("foundation models adapter requires a user prompt")
         response_messages = [self._serialize_message(messages[-1])] if messages else []
-        if session_created:
-            response_messages = [
-                self._serialize_message(message) for message in messages
-            ]
         payload = {
             "prompt": prompt,
             "messages": response_messages,
@@ -263,13 +284,15 @@ class FoundationModelsBridgeAdapter:
         return True
 
     async def _ensure_service_running(self) -> None:
-        if await self._raw_healthcheck():
+        health = await self._service_health()
+        if health is not None:
             return
         if not self.bridge_binary_path:
             return
 
         async with self._startup_lock:
-            if await self._raw_healthcheck():
+            health = await self._service_health()
+            if health is not None:
                 return
 
             binary = Path(self.bridge_binary_path)
@@ -293,7 +316,8 @@ class FoundationModelsBridgeAdapter:
                 self._stderr_task = asyncio.create_task(self._drain_stderr())
 
             for _ in range(40):
-                if await self._raw_healthcheck():
+                health = await self._service_health()
+                if health is not None:
                     return
                 await asyncio.sleep(0.25)
 
@@ -350,9 +374,54 @@ class FoundationModelsBridgeAdapter:
             "metadata": message.metadata,
         }
 
+    @classmethod
+    def _bridge_prompt(cls, messages: List[Message], *, include_history: bool) -> str:
+        latest_user = cls._last_user_message(messages)
+        if not latest_user:
+            return ""
+
+        context_lines: list[str] = []
+        dynamic_system_messages = [
+            message.content.strip()
+            for message in messages
+            if message.role == Role.SYSTEM and message.content.strip()
+        ]
+        if len(dynamic_system_messages) > 1:
+            context_lines.extend(dynamic_system_messages[1:])
+
+        if include_history:
+            history_lines: list[str] = []
+            for message in messages:
+                if message.role == Role.SYSTEM:
+                    continue
+                if message.role == Role.USER and message.content == latest_user:
+                    continue
+                history_lines.append(
+                    "%s: %s"
+                    % (cls._label_for_role(message.role), message.content.strip())
+                )
+            if history_lines:
+                context_lines.append(
+                    "Historico recente:\n%s" % "\n".join(history_lines)
+                )
+
+        if not context_lines:
+            return latest_user
+        return "%s\n\nPedido atual:\n%s" % ("\n\n".join(context_lines), latest_user)
+
     @staticmethod
     def _last_user_message(messages: List[Message]) -> str:
         for message in reversed(messages):
             if message.role == Role.USER:
                 return message.content
         return ""
+
+    @staticmethod
+    def _label_for_role(role: Role) -> str:
+        if role == Role.USER:
+            return "Usuario"
+        if role == Role.ASSISTANT:
+            return "JARVIS"
+        if role == Role.TOOL:
+            return "Tool"
+        return "Sistema"

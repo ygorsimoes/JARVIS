@@ -2,17 +2,20 @@ import Foundation
 
 public struct CLIOptions: Sendable, Equatable {
     public var live: Bool
+    public var vadOnly: Bool
     public var locale: String
     public var format: String
     public var mockTranscript: String?
 
     public init(
         live: Bool = false,
+        vadOnly: Bool = false,
         locale: String = "pt-BR",
         format: String = "ndjson",
         mockTranscript: String? = nil
     ) {
         self.live = live
+        self.vadOnly = vadOnly
         self.locale = locale
         self.format = format
         self.mockTranscript = mockTranscript
@@ -102,6 +105,8 @@ public func parseOptions(arguments: [String]) throws -> CLIOptions {
         switch argument {
         case "--live":
             options.live = true
+        case "--vad-only":
+            options.vadOnly = true
         case "--locale":
             guard let locale = iterator.next() else { throw CLIError.invalidArguments }
             options.locale = locale
@@ -146,5 +151,6 @@ public func mockSequence(transcript: String) -> [SpeechAnalyzerEvent] {
 
 public let usageText = """
 Usage: speechanalyzer-cli --live --locale pt-BR --format ndjson
+       speechanalyzer-cli --live --vad-only --format ndjson
        speechanalyzer-cli --mock-transcript \"Que horas sao agora?\"
 """

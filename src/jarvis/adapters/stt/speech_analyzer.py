@@ -77,13 +77,24 @@ class SpeechAnalyzerSTTAdapter:
         self.locale = locale
 
     async def start_live_session(self) -> SpeechAnalyzerSession:
-        process = await asyncio.create_subprocess_exec(
+        return await self._start_session(vad_only=False)
+
+    async def start_vad_session(self) -> SpeechAnalyzerSession:
+        return await self._start_session(vad_only=True)
+
+    async def _start_session(self, *, vad_only: bool) -> SpeechAnalyzerSession:
+        command = [
             self.binary_path,
             "--live",
             "--locale",
             self.locale,
             "--format",
             "ndjson",
+        ]
+        if vad_only:
+            command.append("--vad-only")
+        process = await asyncio.create_subprocess_exec(
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

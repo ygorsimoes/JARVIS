@@ -32,6 +32,22 @@ struct SpeechAnalyzerCoreAdditionalTests {
         #expect(options.locale == "pt-BR")
         #expect(options.format == "ndjson")
         #expect(options.live == false)
+        #expect(options.vadOnly == false)
+    }
+
+    @Test
+    func parseOptionsSupportsVadOnlyMode() throws {
+        let options = try parseOptions(
+            arguments: [
+                "--live",
+                "--vad-only",
+                "--format", "ndjson",
+            ]
+        )
+
+        #expect(options.live)
+        #expect(options.vadOnly)
+        #expect(options.format == "ndjson")
     }
 
     @Test(arguments: [

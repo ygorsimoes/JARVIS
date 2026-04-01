@@ -19,7 +19,9 @@ from jarvis.config import JarvisConfig
 
 class TestRuntimeAdaptersFactory:
     def test_defaults_use_fake_and_noop_backends_without_native_flag(self):
-        adapters = build_runtime_adapters(JarvisConfig(), enable_native_backends=False)
+        adapters = build_runtime_adapters(
+            JarvisConfig(_env_file=None), enable_native_backends=False
+        )
 
         assert isinstance(adapters.activation, PushToTalkActivationAdapter)
         assert isinstance(adapters.stt, SpeechAnalyzerSTTAdapter)
@@ -30,7 +32,7 @@ class TestRuntimeAdaptersFactory:
         assert isinstance(adapters.playback, NoOpPlaybackBackend)
 
     def test_defaults_build_real_backends_when_native_mode_is_enabled(self):
-        adapters = build_runtime_adapters(JarvisConfig())
+        adapters = build_runtime_adapters(JarvisConfig(_env_file=None))
 
         assert isinstance(adapters.activation, PushToTalkActivationAdapter)
         assert isinstance(adapters.stt, SpeechAnalyzerSTTAdapter)
@@ -39,12 +41,15 @@ class TestRuntimeAdaptersFactory:
         assert isinstance(adapters.deliberative_llm, MLXLMAdapter)
         assert isinstance(adapters.fallback_llm, MLXLMAdapter)
         assert adapters.fallback_backend_name == "mlx_lm_fallback"
-        assert isinstance(adapters.tts, AVSpeechAdapter)
-        assert adapters.tts_backend_name == "avspeech"
+        assert isinstance(adapters.tts, FallbackTTSAdapter)
+        assert isinstance(adapters.tts.primary, MLXAudioKokoroAdapter)
+        assert isinstance(adapters.tts.fallback, AVSpeechAdapter)
+        assert adapters.tts_backend_name == "mlx_audio_kokoro+avspeech"
         assert isinstance(adapters.playback, SoundDevicePlaybackBackend)
 
     def test_native_flag_builds_real_backends_when_requested(self):
         config = JarvisConfig(
+            _env_file=None,
             llm_hot_path="foundation_models",
             llm_deliberative="mlx_lm",
             llm_hot_path_fallback="mlx_lm",
@@ -63,7 +68,7 @@ class TestRuntimeAdaptersFactory:
         assert isinstance(adapters.playback, SoundDevicePlaybackBackend)
 
     def test_native_flag_can_build_avspeech_fallback(self):
-        config = JarvisConfig(tts_backend="avspeech")
+        config = JarvisConfig(_env_file=None, tts_backend="avspeech")
 
         adapters = build_runtime_adapters(config, enable_native_backends=True)
 

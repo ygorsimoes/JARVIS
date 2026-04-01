@@ -26,8 +26,35 @@ class ComplexityRouter:
                 reason="consulta objetiva de horario",
             ),
             _DirectIntent(
+                tool_name="system.set_volume",
+                pattern=re.compile(
+                    r"(?:\b(?:volume|som)\b[^\n]*\b\d{1,3}\b)|(?:\b\d{1,3}\b[^\n]*\b(?:volume|som)\b)",
+                    re.IGNORECASE,
+                ),
+                reason="ajuste direto de volume",
+            ),
+            _DirectIntent(
+                tool_name="timer.cancel",
+                pattern=re.compile(
+                    r"\b(cancela|cancelar|pare|parar|remove|remover)\b[^\n]*\b(timer|cron[oô]metro|alarme)\b",
+                    re.IGNORECASE,
+                ),
+                reason="cancelamento direto de timer",
+            ),
+            _DirectIntent(
+                tool_name="timer.list",
+                pattern=re.compile(
+                    r"(?:\b(lista|listar|mostra|mostrar|quais|tenho)\b[^\n]*\b(timers?|cron[oô]metros?|alarmes?)\b)|(?:\b(timers?|cron[oô]metros?|alarmes?)\b[^\n]*\bativos?\b)",
+                    re.IGNORECASE,
+                ),
+                reason="consulta direta de timers ativos",
+            ),
+            _DirectIntent(
                 tool_name="timer.start",
-                pattern=re.compile(r"\b(timer|cron[oô]metro|alarme)\b", re.IGNORECASE),
+                pattern=re.compile(
+                    r"(?:\b(defina|define|crie|criar|inicie|iniciar|coloque|marque|programe)\b[^\n]*\b(timer|cron[oô]metro|alarme)\b)|(?:\b(timer|cron[oô]metro|alarme)\b[^\n]*\b\d+\b)",
+                    re.IGNORECASE,
+                ),
                 reason="intencao direta de timer",
             ),
             _DirectIntent(
@@ -37,6 +64,19 @@ class ComplexityRouter:
                     re.IGNORECASE,
                 ),
                 reason="busca direta na web",
+            ),
+            _DirectIntent(
+                tool_name="browser.fetch_url",
+                pattern=re.compile(r"https?://\S+", re.IGNORECASE),
+                reason="leitura direta de url",
+            ),
+            _DirectIntent(
+                tool_name="calendar.list_events",
+                pattern=re.compile(
+                    r"(?:\b(quais|mostra|mostrar|lista|listar|tenho)\b[^\n]*\b(eventos?|agenda|calend[aá]rio)\b)|(?:\b(eventos?|agenda|calend[aá]rio)\b[^\n]*\b(hoje|amanh[aã]|semana|dias?)\b)",
+                    re.IGNORECASE,
+                ),
+                reason="consulta direta de calendario",
             ),
             _DirectIntent(
                 tool_name="system.open_app",
@@ -134,13 +174,6 @@ class ComplexityRouter:
         if recent_turns > 8:
             complexity_score += 1
 
-        if recalled_memories > 0:
-            return RouteDecision(
-                target=RouteTarget.DELIBERATIVE,
-                reason="memoria recuperada exige contexto adicional",
-                confidence=0.85,
-            )
-
         if len(direct_matches) > 1 or estimated_tool_depth > 1:
             return RouteDecision(
                 target=RouteTarget.DELIBERATIVE,
@@ -148,13 +181,20 @@ class ComplexityRouter:
                 confidence=0.92,
             )
 
-        if direct_matches and complexity_score <= 1:
+        if direct_matches and multi_step_hits == 0 and estimated_tool_depth <= 1:
             intent = direct_matches[0]
             return RouteDecision(
                 target=RouteTarget.DIRECT_TOOL,
                 tool_name=intent.tool_name,
                 reason=intent.reason,
                 confidence=0.95,
+            )
+
+        if recalled_memories > 1:
+            return RouteDecision(
+                target=RouteTarget.DELIBERATIVE,
+                reason="memoria recuperada exige contexto adicional",
+                confidence=0.85,
             )
 
         if reasoning_hits > 0 or multi_step_hits > 0 or complexity_score >= 2:

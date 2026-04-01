@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from jarvis.adapters.stt.speech_analyzer import SpeechAnalyzerStreamError
 from jarvis.config import JarvisConfig
 from jarvis.core.speech_pipeline import SpeechPipeline
 from jarvis.runtime import JarvisRuntime
@@ -29,6 +30,17 @@ class FakeSTTAdapter:
 
     async def start_live_session(self):
         return self.session
+
+
+class FailingVADSTTAdapter(FakeSTTAdapter):
+    def __init__(self, error_message, fallback_events):
+        super().__init__(fallback_events)
+        self.error_message = error_message
+        self.vad_attempts = 0
+
+    async def start_vad_session(self):
+        self.vad_attempts += 1
+        raise SpeechAnalyzerStreamError(self.error_message)
 
 
 class FakeVADAdapter:
@@ -93,3 +105,26 @@ class TestBargeInWatcher:
         await self.runtime._barge_in_watcher(task, pipeline)
 
         self.runtime.interrupt_current_turn.assert_not_called()
+
+    async def test_watcher_falls_back_when_vad_only_is_not_supported(self):
+        self.runtime.stt_adapter = FailingVADSTTAdapter(
+            "invalid_arguments Usage: speechanalyzer-cli",
+            [
+                {"type": "other_event"},
+                {"type": "speech", "classified": {"speech_detected": True}},
+            ],
+        )
+        self.runtime.vad_adapter = FakeVADAdapter()
+        self.runtime.interrupt_current_turn = AsyncMock(return_value=True)
+
+        async def dummy_response():
+            await asyncio.sleep(1.0)
+
+        task = asyncio.create_task(dummy_response())
+        pipeline = MagicMock(spec=SpeechPipeline)
+
+        await self.runtime._barge_in_watcher(task, pipeline)
+
+        self.runtime.interrupt_current_turn.assert_called_once_with(reason="barge-in")
+        assert self.runtime.stt_adapter.vad_attempts == 1
+        task.cancel()

@@ -1,6 +1,7 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +12,7 @@ from jarvis.models.conversation import Message, Role
 class _BridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     stream_mode = "tool_call_success"
+    health_payload = {"status": "ok", "availability": "available"}
     created_session_payload = None
     response_payload = None
     created_session_count = 0
@@ -23,6 +25,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
     @classmethod
     def reset_state(cls):
         cls.stream_mode = "tool_call_success"
+        cls.health_payload = {"status": "ok", "availability": "available"}
         cls.created_session_payload = None
         cls.response_payload = None
         cls.created_session_count = 0
@@ -38,8 +41,11 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        body = json.dumps({"status": "ok", "availability": "available"}).encode("utf-8")
-        self.send_response(200)
+        body = json.dumps(_BridgeHandler.health_payload).encode("utf-8")
+        status_code = (
+            200 if _BridgeHandler.health_payload.get("status") == "ok" else 503
+        )
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -219,6 +225,50 @@ class TestFoundationModelsAdapter:
         )
         assert await adapter.healthcheck()
 
+    async def test_healthcheck_rejects_unavailable_backend(self):
+        _BridgeHandler.health_payload = {
+            "status": "unavailable",
+            "availability": "model_not_ready",
+        }
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+
+        assert not await adapter.healthcheck()
+
+    async def test_bridge_prompt_includes_dynamic_context_when_session_is_created(self):
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url,
+            instructions="Teste",
+        )
+        messages = [
+            Message(role=Role.SYSTEM, content="Prompt base"),
+            Message(
+                role=Role.SYSTEM,
+                content="Memorias relevantes para este turno:\n- [profile 0.90] Usuario prefere respostas curtas",
+            ),
+            Message(role=Role.ASSISTANT, content="Resposta anterior."),
+            Message(role=Role.USER, content="Me lembra do resumo"),
+        ]
+
+        async def tool_invoker(tool_name, args):
+            return {"tool_name": tool_name, "args": args}
+
+        async for _ in adapter.chat_stream(
+            messages=messages,
+            tools=[],
+            max_kv_size=0,
+            tool_invoker=tool_invoker,
+        ):
+            pass
+
+        response_payload = _BridgeHandler.response_payload
+        assert response_payload is not None
+        assert "Memorias relevantes para este turno" in response_payload["prompt"]
+        assert "Historico recente" in response_payload["prompt"]
+        assert response_payload["prompt"].endswith("Pedido atual:\nMe lembra do resumo")
+
     async def test_chat_stream_creates_session_and_yields_text(self):
         adapter = FoundationModelsBridgeAdapter(
             base_url=self.base_url,
@@ -333,6 +383,32 @@ class TestFoundationModelsAdapter:
         assert _BridgeHandler.cancelled
         assert _BridgeHandler.deleted
         assert adapter.session_id is None
+
+    async def test_close_session_ignores_connection_reset(self):
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url, instructions="Teste"
+        )
+        adapter.session_id = "session-123"
+
+        with patch.object(
+            adapter, "_open_request", side_effect=ConnectionResetError(54, "reset")
+        ):
+            await adapter.close_session()
+
+        assert adapter.session_id is None
+
+    async def test_cancel_current_response_returns_false_on_connection_reset(self):
+        adapter = FoundationModelsBridgeAdapter(
+            base_url=self.base_url, instructions="Teste"
+        )
+        adapter.session_id = "session-123"
+
+        with patch.object(
+            adapter, "_open_request", side_effect=ConnectionResetError(54, "reset")
+        ):
+            cancelled = await adapter.cancel_current_response()
+
+        assert not cancelled
 
     async def test_chat_stream_raises_when_bridge_emits_error_event(self):
         _BridgeHandler.stream_mode = "error_event"

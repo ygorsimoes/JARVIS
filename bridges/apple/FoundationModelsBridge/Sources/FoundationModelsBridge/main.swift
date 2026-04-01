@@ -372,7 +372,9 @@ struct FoundationModelsHTTPServer: Sendable {
         let router = Router()
 
         router.get("/health") { _, _ in
-            try encodeJSONResponse(self.healthPayload())
+            let payload = self.healthPayload()
+            let status: HTTPResponse.Status = payload.status == "ok" ? .ok : .serviceUnavailable
+            return try encodeJSONResponse(payload).withStatus(status)
         }
 
         router.post("/sessions") { request, _ in

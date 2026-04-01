@@ -63,7 +63,7 @@ class JarvisConfig(BaseSettings):
     llm_deliberative_repetition_penalty: float = 1.0
     llm_response_max_tokens: int = 512
 
-    tts_backend: str = "avspeech"
+    tts_backend: str = "mlx_audio_kokoro"
     tts_model: str = "mlx-community/Kokoro-82M-bf16"
     tts_voice: str = "pm_santa"
     tts_lang_code: str = "p"
@@ -91,11 +91,12 @@ class JarvisConfig(BaseSettings):
     sentence_max_pending_segments: int = 2
     sentence_backpressure_poll_ms: int = 10
 
-    turn_silence_timeout_ms: int = 300
+    turn_silence_timeout_ms: int = 800
     turn_partial_commit_min_chars: int = 16
-    turn_partial_stability_ms: int = 120
+    turn_partial_stability_ms: int = 250
     turn_tick_interval_ms: int = 100
     turn_max_duration_s: float = 30.0
+    memory_recall_timeout_ms: int = 50
 
     log_level: str = "INFO"
     log_format: str = "auto"
