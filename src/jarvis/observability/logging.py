@@ -43,6 +43,16 @@ def configure_logging(level: str = "INFO", log_format: str = "console") -> None:
     root_logger.handlers = [handler]
     root_logger.setLevel(level.upper())
 
+    for logger_name in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "huggingface_hub",
+        "sentence_transformers",
+        "transformers",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
     structlog.configure(
         processors=[
             *processors,

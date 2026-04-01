@@ -24,6 +24,8 @@ class JarvisConfig(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="JARVIS_",
         extra="ignore",
+        enable_decoding=False,
+        populate_by_name=True,
     )
 
     app_name: str = "J.A.R.V.I.S."
@@ -43,16 +45,25 @@ class JarvisConfig(BaseSettings):
     llm_hot_path_bridge_bin: str = (
         "./bridges/apple/FoundationModelsBridge/.build/release/foundation-models-bridge"
     )
+    llm_hot_path_fallback: str = Field(
+        default="mlx_lm",
+        validation_alias=AliasChoices("LLM_HOT_PATH_FALLBACK", "LLM_FALLBACK"),
+    )
+    llm_hot_path_fallback_model: str = Field(
+        default="mlx-community/Qwen3-4B-4bit",
+        validation_alias=AliasChoices(
+            "LLM_HOT_PATH_FALLBACK_MODEL",
+            "LLM_FALLBACK_MODEL",
+        ),
+    )
     llm_deliberative: str = "mlx_lm"
     llm_deliberative_model: str = "mlx-community/Qwen3-8B-4bit"
     llm_deliberative_temperature: float = 0.2
     llm_deliberative_top_p: float = 0.9
     llm_deliberative_repetition_penalty: float = 1.0
-    llm_fallback: str = "anthropic"
-    llm_fallback_model: str = "claude-3-7-sonnet-20250219"
     llm_response_max_tokens: int = 512
 
-    tts_backend: str = "mlx_audio_kokoro"
+    tts_backend: str = "avspeech"
     tts_model: str = "mlx-community/Kokoro-82M-bf16"
     tts_voice: str = "pm_santa"
     tts_lang_code: str = "p"

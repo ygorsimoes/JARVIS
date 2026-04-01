@@ -23,17 +23,19 @@ Assistente local-first, macOS-first, com control-plane em Python e bridges nativ
 ### Bootstrap
 
 ```bash
-bash scripts/bootstrap-macos.sh
+bash scripts/setup-macos.sh
 ```
 
 Se quiser fazer manualmente:
 
 ```bash
-uv sync
+brew bundle
+uv sync --extra macos-runtime
 cp .env.example .env
 swiftlint lint --config .swiftlint.yml
 swift build -c release --package-path bridges/apple/SpeechAnalyzerCLI
 swift build -c release --package-path bridges/apple/FoundationModelsBridge
+uv run jarvis --doctor
 ```
 
 ## Rodando
@@ -54,12 +56,6 @@ Turno único:
 
 ```bash
 uv run jarvis --demo "Que horas sao agora?"
-```
-
-Modo desenvolvimento com backends fake/noop:
-
-```bash
-uv run jarvis --mock-backends --interactive
 ```
 
 ## Testes e qualidade

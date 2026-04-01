@@ -5,6 +5,7 @@ import importlib
 import threading
 from typing import Any, AsyncIterator, Callable, List
 
+from ...model_cache import resolve_cached_model_reference
 from ...models.conversation import Message
 
 
@@ -30,6 +31,7 @@ class MLXLMAdapter:
         self._generation_lock = threading.Lock()
         self._generation_active = False
         self._last_generation_stats: dict[str, object] = {}
+        self._strip_thinking = True
 
     @property
     def last_generation_stats(self) -> dict[str, object]:
@@ -60,6 +62,7 @@ class MLXLMAdapter:
         )
         self._cancel_event.clear()
         self._last_generation_stats = {}
+        stream_filter = _StreamingThinkFilter(enabled=self._strip_thinking)
 
         def worker() -> None:
             with self._generation_lock:
@@ -76,7 +79,11 @@ class MLXLMAdapter:
                         break
                     text = getattr(response, "text", "")
                     if text:
-                        asyncio.run_coroutine_threadsafe(queue.put(text), loop)
+                        visible_text = stream_filter.consume(text)
+                        if visible_text:
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put(visible_text), loop
+                            )
                     finish_reason = getattr(response, "finish_reason", None)
                     if finish_reason:
                         self._last_generation_stats = {
@@ -91,6 +98,9 @@ class MLXLMAdapter:
             except Exception as exc:
                 asyncio.run_coroutine_threadsafe(queue.put(exc), loop)
             finally:
+                trailing_text = stream_filter.flush()
+                if trailing_text:
+                    asyncio.run_coroutine_threadsafe(queue.put(trailing_text), loop)
                 with self._generation_lock:
                     self._generation_active = False
                 asyncio.run_coroutine_threadsafe(queue.put(None), loop)
@@ -132,7 +142,8 @@ class MLXLMAdapter:
             ) from exc
         load = getattr(module, "load")
         stream_generate = getattr(module, "stream_generate")
-        self._model, self._tokenizer = load(self.model_repo)
+        model_reference = resolve_cached_model_reference(self.model_repo)
+        self._model, self._tokenizer = load(model_reference)
         self._load = load
         self._stream_generate = stream_generate
         assert self._stream_generate is not None
@@ -177,3 +188,68 @@ class MLXLMAdapter:
     @staticmethod
     def _serialize_message(message: Message) -> dict:
         return {"role": message.role.value, "content": message.content}
+
+
+class _StreamingThinkFilter:
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._buffer = ""
+        self._inside_think = False
+
+    def consume(self, chunk: str) -> str:
+        if not self._enabled or not chunk:
+            return chunk
+
+        self._buffer += chunk
+        output: list[str] = []
+        start_tag = "<think>"
+        end_tag = "</think>"
+
+        while self._buffer:
+            if self._inside_think:
+                end_index = self._buffer.find(end_tag)
+                if end_index == -1:
+                    suffix_length = self._partial_tag_suffix_length(
+                        self._buffer,
+                        end_tag,
+                    )
+                    self._buffer = (
+                        self._buffer[-suffix_length:] if suffix_length else ""
+                    )
+                    break
+                self._buffer = self._buffer[end_index + len(end_tag) :]
+                self._inside_think = False
+                continue
+
+            start_index = self._buffer.find(start_tag)
+            if start_index == -1:
+                suffix_length = self._partial_tag_suffix_length(self._buffer, start_tag)
+                safe_length = len(self._buffer) - suffix_length
+                if safe_length == 0:
+                    break
+                output.append(self._buffer[:safe_length])
+                self._buffer = self._buffer[safe_length:]
+                break
+
+            if start_index > 0:
+                output.append(self._buffer[:start_index])
+            self._buffer = self._buffer[start_index + len(start_tag) :]
+            self._inside_think = True
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        if not self._enabled or self._inside_think:
+            self._buffer = ""
+            return ""
+        trailing = self._buffer
+        self._buffer = ""
+        return trailing
+
+    @staticmethod
+    def _partial_tag_suffix_length(buffer: str, tag: str) -> int:
+        max_length = min(len(buffer), len(tag) - 1)
+        for length in range(max_length, 0, -1):
+            if buffer.endswith(tag[:length]):
+                return length
+        return 0

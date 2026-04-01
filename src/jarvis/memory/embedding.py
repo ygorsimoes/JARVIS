@@ -4,6 +4,7 @@ import asyncio
 import struct
 from typing import List, Optional
 
+from ..model_cache import resolve_cached_model_reference
 from ..observability import get_logger
 
 logger = get_logger(__name__)
@@ -127,7 +128,10 @@ class EmbeddingProvider:
     def _load_mlx(self) -> None:
         from mlx_lm import load as mlx_load  # type: ignore[import]
 
-        model, tokenizer = mlx_load("mlx-community/Qwen3-Embedding-0.6B-4bit")
+        model_reference = resolve_cached_model_reference(
+            "mlx-community/Qwen3-Embedding-0.6B-4bit"
+        )
+        model, tokenizer = mlx_load(model_reference)
         self._model = (model, tokenizer)
         self._backend_name = "mlx_qwen3_embedding"
 

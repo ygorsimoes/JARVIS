@@ -11,7 +11,7 @@ class TestJarvisConfig:
         assert config.stt_backend == "speech_analyzer"
         assert config.llm_hot_path == "foundation_models"
         assert config.llm_deliberative == "mlx_lm"
-        assert config.tts_backend == "mlx_audio_kokoro"
+        assert config.tts_backend == "avspeech"
         assert config.tts_model == "mlx-community/Kokoro-82M-bf16"
         assert config.tts_voice == "pm_santa"
         assert config.tts_lang_code == "p"

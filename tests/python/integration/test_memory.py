@@ -200,6 +200,27 @@ async def test_memory_store_fts_search():
 
 
 @pytest.mark.asyncio
+async def test_memory_store_fts_search_accepts_query_with_punctuation():
+    store = MemoryStore(
+        db_path=":memory:",
+        embedding_provider=EmbeddingProvider(preferred_backend="stub"),
+    )
+    await store.open()
+    await store.save(
+        content="olá tudo bem contigo",
+        category=MemoryCategory.EPISODIC,
+        source=MemorySource.EXPLICIT,
+        confidence=0.9,
+    )
+
+    results = await store.search_fts("olá, tudo bem contigo?", top_k=5)
+
+    assert len(results) == 1
+    assert results[0].content == "olá tudo bem contigo"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_memory_store_list_all():
     store = MemoryStore(
         db_path=":memory:",

@@ -2,6 +2,8 @@ import argparse
 import types
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from jarvis import main as main_module
 from jarvis.config import JarvisConfig
 
@@ -10,10 +12,10 @@ class TestMainModule:
     def test_build_parser_supports_expected_flags(self):
         parser = main_module.build_parser()
 
-        args = parser.parse_args(["--demo", "oi", "--mock-backends"])
+        args = parser.parse_args(["--demo", "oi", "--doctor"])
 
         assert args.demo == "oi"
-        assert args.mock_backends
+        assert args.doctor
         assert not args.interactive
         assert not args.voice
 
@@ -22,7 +24,7 @@ class TestMainModule:
             demo="ola",
             interactive=False,
             voice=False,
-            mock_backends=False,
+            doctor=False,
         )
 
         with patch.object(main_module, "build_parser") as build_parser:
@@ -47,7 +49,7 @@ class TestMainModule:
                         prompt="teste",
                         interactive=False,
                         voice=False,
-                        use_native_backends=False,
+                        use_native_backends=True,
                     )
                 )
 
@@ -71,7 +73,7 @@ class TestMainModule:
                                 prompt=None,
                                 interactive=True,
                                 voice=False,
-                                use_native_backends=False,
+                                use_native_backends=True,
                             )
                         )
 
@@ -96,10 +98,34 @@ class TestMainModule:
                             prompt=None,
                             interactive=False,
                             voice=True,
-                            use_native_backends=False,
+                            use_native_backends=True,
                         )
                     )
 
         assert result is None
         runtime.run_voice_foreground.assert_awaited_once()
         runtime.shutdown.assert_awaited_once()
+
+    def test_main_runs_doctor_and_exits_with_success_when_no_blockers(self):
+        parsed_args = argparse.Namespace(
+            demo=None,
+            interactive=False,
+            voice=False,
+            doctor=True,
+        )
+        config = JarvisConfig()
+        report = types.SimpleNamespace(has_blockers=False)
+
+        with patch.object(main_module, "build_parser") as build_parser:
+            with patch("jarvis.main.load_config", return_value=config):
+                with patch("jarvis.main.configure_logging"):
+                    with patch(
+                        "jarvis.main.run_doctor", AsyncMock(return_value=report)
+                    ):
+                        build_parser.return_value.parse_args.return_value = parsed_args
+                        with patch("jarvis.main._run_demo") as run_demo:
+                            with pytest.raises(SystemExit) as exc_info:
+                                main_module.main()
+
+        run_demo.assert_not_called()
+        assert exc_info.value.code == 0

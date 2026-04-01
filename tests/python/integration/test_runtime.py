@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
+from jarvis.adapters.stt.speech_analyzer import SpeechAnalyzerStreamError
 from jarvis.config import JarvisConfig
 from jarvis.core.action_broker import ActionBroker, ActionRequest
 from jarvis.core.capability_broker import Capability, CapabilityBroker
@@ -12,7 +13,7 @@ from jarvis.models.conversation import Role, RouteDecision, RouteTarget
 from jarvis.models.events import EventType
 from jarvis.models.memory import Memory, MemoryCategory, MemorySource
 from jarvis.models.state import JarvisState
-from jarvis.runtime import JarvisRuntime
+from jarvis.runtime import JarvisRuntime, VoiceCaptureError
 
 
 class FakeActivationAdapter:
@@ -36,6 +37,31 @@ class FakeSTTSession:
         self.stopped = True
 
 
+class DelayedSTTSession(FakeSTTSession):
+    def __init__(self, events, delay_s: float):
+        super().__init__(events)
+        self._delay_s = delay_s
+
+    async def iter_events(self):
+        for index, event in enumerate(self._events):
+            if index > 0:
+                await asyncio.sleep(self._delay_s)
+            yield event
+
+
+class FailingSTTSession:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+        self.stopped = False
+
+    async def iter_events(self):
+        raise self.exc
+        yield  # pragma: no cover
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 class FakeSTTAdapter:
     def __init__(self, events):
         self.events = events
@@ -44,6 +70,25 @@ class FakeSTTAdapter:
         session_events = self.events
         self.events = []  # O watcher não ver eventos
         return FakeSTTSession(session_events)
+
+
+class DelayedSTTAdapter(FakeSTTAdapter):
+    def __init__(self, events, delay_s: float):
+        super().__init__(events)
+        self.delay_s = delay_s
+
+    async def start_live_session(self):
+        session_events = self.events
+        self.events = []
+        return DelayedSTTSession(session_events, self.delay_s)
+
+
+class FailingSTTAdapter:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    async def start_live_session(self):
+        return FailingSTTSession(self.exc)
 
 
 class FakePlaybackBackend:
@@ -185,6 +230,44 @@ class TestRuntime:
         assert turn.text == "Que horas sao agora?"
         assert self.runtime.state_machine.state == JarvisState.TRANSCRIBING
 
+    async def test_capture_voice_turn_survives_short_silence_after_ready(self):
+        delay_s = self.runtime.turn_manager_config.tick_interval_ms / 1000.0 * 1.5
+        self.runtime.stt_adapter = DelayedSTTAdapter(
+            [
+                {"type": "ready", "locale": "pt-BR", "sample_rate": 16000},
+                {"type": "speech_started"},
+                {"type": "partial_transcript", "text": "olá tudo bem"},
+                {"type": "speech_ended"},
+                {"type": "final_transcript", "text": "Olá, tudo bem?"},
+            ],
+            delay_s=delay_s,
+        )
+
+        turn = await self.runtime.capture_voice_turn()
+
+        assert turn.text == "Olá, tudo bem?"
+        assert self.runtime.state_machine.state == JarvisState.TRANSCRIBING
+
+    async def test_capture_voice_turn_surfaces_stt_error_message(self):
+        self.runtime.stt_adapter = FakeSTTAdapter(
+            [{"type": "error", "message": "microphone_permission_denied"}]
+        )
+
+        with pytest.raises(VoiceCaptureError, match="microphone_permission_denied"):
+            await self.runtime.capture_voice_turn()
+
+        assert self.runtime.state_machine.state == JarvisState.IDLE
+
+    async def test_capture_voice_turn_wraps_stt_stream_failures(self):
+        self.runtime.stt_adapter = FailingSTTAdapter(
+            SpeechAnalyzerStreamError("SpeechAnalyzer CLI failed without stderr output")
+        )
+
+        with pytest.raises(VoiceCaptureError, match="erro no reconhecimento de voz"):
+            await self.runtime.capture_voice_turn()
+
+        assert self.runtime.state_machine.state == JarvisState.IDLE
+
     async def test_run_voice_foreground_handles_one_turn(self):
         self.runtime.activation_adapter = FakeActivationAdapter([True])
         self.runtime.stt_adapter = FakeSTTAdapter(
@@ -204,6 +287,20 @@ class TestRuntime:
         assert any(line.startswith("voce>") for line in printed_lines)
         assert any(line.startswith("jarvis>") for line in printed_lines)
         assert self.runtime.playback_backend.played
+        assert self.runtime.state_machine.state == JarvisState.IDLE
+
+    async def test_run_voice_foreground_reports_capture_failures_without_traceback(
+        self,
+    ):
+        self.runtime.activation_adapter = FakeActivationAdapter([True])
+        self.runtime.stt_adapter = FakeSTTAdapter([{"type": "ready"}])
+
+        with patch("builtins.print") as print_mock:
+            await self.runtime.run_voice_foreground(turn_limit=1)
+
+        printed_lines = [call.args[0] for call in print_mock.call_args_list]
+        assert any(line.startswith("jarvis>") for line in printed_lines)
+        assert any("nenhuma fala utilizavel" in line for line in printed_lines)
         assert self.runtime.state_machine.state == JarvisState.IDLE
 
     async def test_interrupt_current_turn_cancels_active_response(self):

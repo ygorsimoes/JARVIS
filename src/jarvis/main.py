@@ -5,6 +5,7 @@ import asyncio
 from typing import Optional
 
 from .config import load_config
+from .doctor import run_doctor
 from .observability import configure_logging
 from .runtime import JarvisRuntime
 
@@ -60,9 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--voice", action="store_true", help="inicia o loop foreground de voz"
     )
     parser.add_argument(
-        "--mock-backends",
+        "--doctor",
         action="store_true",
-        help="forca o uso de backends fake e noop para desenvolvimento local",
+        help="valida se o ambiente macOS esta pronto para o runtime real",
     )
     return parser
 
@@ -70,12 +71,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.doctor:
+        config = load_config()
+        configure_logging(config.log_level, config.log_format)
+        report = asyncio.run(run_doctor(config))
+        raise SystemExit(1 if report.has_blockers else 0)
+
     asyncio.run(
         _run_demo(
             prompt=args.demo,
             interactive=args.interactive,
             voice=args.voice,
-            use_native_backends=not args.mock_backends,
+            use_native_backends=True,
         )
     )
 

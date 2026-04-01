@@ -8,6 +8,7 @@ from typing import AsyncIterator, Iterable, List, Optional
 
 from .adapters import build_runtime_adapters
 from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
+from .adapters.stt.speech_analyzer import SpeechAnalyzerStreamError
 from .bus import EventBus
 from .config import JarvisConfig
 from .core.action_broker import ActionBroker, ActionRequest
@@ -67,6 +68,10 @@ class CapturedVoiceTurn:
     reason: str
     used_partial: bool
     metadata: dict
+
+
+class VoiceCaptureError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -188,7 +193,11 @@ class JarvisRuntime:
         # Memory adapter — stored in ~/.jarvis/memory.db by default.
         memory_db_path = Path.home() / ".jarvis" / "memory.db"
         memory_db_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_adapter = SQLiteVecMemoryAdapter(db_path=memory_db_path)
+        embedding_backend = "auto" if enable_native_backends else "stub"
+        memory_adapter = SQLiteVecMemoryAdapter(
+            db_path=memory_db_path,
+            embedding_backend=embedding_backend,
+        )
         memory_system = MemorySystem(memory_adapter)
 
         return cls(
@@ -236,7 +245,12 @@ class JarvisRuntime:
                 backend=self.activation_backend_name,
             )
 
-            voice_turn = await self.capture_voice_turn()
+            try:
+                voice_turn = await self.capture_voice_turn()
+            except VoiceCaptureError as exc:
+                print("jarvis> %s" % exc)
+                handled_turns += 1
+                continue
             print("voce> %s" % voice_turn.text)
             pipeline = SpeechPipeline(
                 tts_adapter=self.tts_adapter,
@@ -310,6 +324,8 @@ class JarvisRuntime:
     async def capture_voice_turn(self) -> CapturedVoiceTurn:
         turn_id = str(uuid.uuid4())
         turn_manager = TurnManager(self.turn_manager_config)
+        saw_speech_signal = False
+        saw_partial_transcript = False
         await self.state_machine.transition(JarvisState.ARMED, "activation accepted")
         await self.state_machine.transition(
             JarvisState.LISTENING, "voice capture started"
@@ -317,14 +333,25 @@ class JarvisRuntime:
 
         session = await self.stt_adapter.start_live_session()
         completed_turn: Optional[CompletedTurn] = None
+        pending_event_task: Optional[asyncio.Task] = None
         try:
             event_iterator = session.iter_events().__aiter__()
             while completed_turn is None:
                 try:
+                    if pending_event_task is None:
+                        pending_event_task = asyncio.create_task(
+                            event_iterator.__anext__(),
+                            name="jarvis-stt-next-event",
+                        )
                     event = await asyncio.wait_for(
-                        event_iterator.__anext__(),
+                        asyncio.shield(pending_event_task),
                         timeout=self.turn_manager_config.tick_interval_ms / 1000.0,
                     )
+                    pending_event_task = None
+                except SpeechAnalyzerStreamError as exc:
+                    raise VoiceCaptureError(
+                        "erro no reconhecimento de voz: %s" % exc
+                    ) from exc
                 except asyncio.TimeoutError:
                     completed_turn = turn_manager.tick()
                     continue
@@ -333,10 +360,40 @@ class JarvisRuntime:
                     break
 
                 await self._publish_stt_event(event, turn_id=turn_id)
+                event_type = event.get("type")
+                if event_type == "error":
+                    message = str(
+                        event.get("message") or "speech analyzer reported an error"
+                    )
+                    raise VoiceCaptureError(
+                        "erro no reconhecimento de voz: %s" % message
+                    )
+                if event_type in {"speech_started", "final_transcript"}:
+                    saw_speech_signal = True
+                if event_type == "speech_detector_result" and event.get(
+                    "speech_detected"
+                ):
+                    saw_speech_signal = True
+                if (
+                    event_type == "partial_transcript"
+                    and str(event.get("text") or "").strip()
+                ):
+                    saw_partial_transcript = True
+                    saw_speech_signal = True
                 completed_turn = self._consume_turn_signal(turn_manager, event)
 
             if completed_turn is None or not completed_turn.text:
-                raise RuntimeError("voice turn ended without a usable transcript")
+                if saw_partial_transcript:
+                    raise VoiceCaptureError(
+                        "nao consegui fechar uma transcricao final. Tente falar uma frase completa e aguarde um instante em silencio."
+                    )
+                if saw_speech_signal:
+                    raise VoiceCaptureError(
+                        "o microfone captou voz, mas nao houve uma transcricao utilizavel. Tente novamente falando um pouco mais devagar."
+                    )
+                raise VoiceCaptureError(
+                    "nenhuma fala utilizavel foi capturada. Verifique o microfone e tente novamente."
+                )
 
             await self._publish_event(
                 EventType.TURN_READY,
@@ -371,6 +428,12 @@ class JarvisRuntime:
             await self._handle_turn_failure(exc, input_text=None)
             raise
         finally:
+            if pending_event_task is not None and not pending_event_task.done():
+                pending_event_task.cancel()
+                try:
+                    await pending_event_task
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
             await session.stop()
 
     async def stream_transcribed_turn(

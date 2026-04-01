@@ -1,13 +1,16 @@
 import array
+import importlib
 import time
 import types
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
 
 from jarvis.adapters.llm.mlx_lm import MLXLMAdapter
 from jarvis.adapters.tts.avspeech import AVSpeechAdapter
+from jarvis.adapters.tts.fallback import FallbackTTSAdapter
 from jarvis.adapters.tts.mlx_audio_kokoro import MLXAudioKokoroAdapter
 from jarvis.models.conversation import Message, Role
 
@@ -62,6 +65,7 @@ class TestMLXLMAdapter:
         fake_module = types.SimpleNamespace(
             load=fake_load, stream_generate=fake_stream_generate
         )
+        real_import_module = importlib.import_module
 
         def fake_import_module(name):
             if name == "mlx_lm":
@@ -75,19 +79,23 @@ class TestMLXLMAdapter:
                         logits_calls.append(kwargs) or "logits"
                     ),
                 )
-            raise ImportError(name)
+            return real_import_module(name)
 
         with patch(
             "jarvis.adapters.llm.mlx_lm.importlib.import_module",
             side_effect=fake_import_module,
         ):
-            chunks = []
-            async for chunk in adapter.chat_stream(
-                messages=[Message(role=Role.USER, content="Oi")],
-                tools=[],
-                max_kv_size=64,
+            with patch(
+                "jarvis.adapters.llm.mlx_lm.resolve_cached_model_reference",
+                side_effect=lambda model_repo: model_repo,
             ):
-                chunks.append(chunk)
+                chunks = []
+                async for chunk in adapter.chat_stream(
+                    messages=[Message(role=Role.USER, content="Oi")],
+                    tools=[],
+                    max_kv_size=64,
+                ):
+                    chunks.append(chunk)
 
         assert chunks == ["Ola ", "mundo"]
         assert fake_tokenizer.messages == [{"role": "user", "content": "Oi"}]
@@ -98,12 +106,16 @@ class TestMLXLMAdapter:
     async def test_chat_stream_raises_clear_error_when_mlx_lm_is_missing(self):
         adapter = MLXLMAdapter(model_repo="mlx-community/test-model")
         with patch(
-            "jarvis.adapters.llm.mlx_lm.importlib.import_module",
-            side_effect=ImportError,
+            "jarvis.adapters.llm.mlx_lm.resolve_cached_model_reference",
+            side_effect=lambda model_repo: model_repo,
         ):
-            with pytest.raises(RuntimeError):
-                async for _ in adapter.chat_stream([], [], 0):
-                    pass
+            with patch(
+                "jarvis.adapters.llm.mlx_lm.importlib.import_module",
+                side_effect=ImportError,
+            ):
+                with pytest.raises(RuntimeError):
+                    async for _ in adapter.chat_stream([], [], 0):
+                        pass
 
     async def test_cancel_current_response_stops_stream_after_current_chunk(self):
         adapter = MLXLMAdapter(model_repo="mlx-community/test-model", max_tokens=8)
@@ -128,24 +140,68 @@ class TestMLXLMAdapter:
         )
 
         with patch(
-            "jarvis.adapters.llm.mlx_lm.importlib.import_module",
-            return_value=fake_module,
+            "jarvis.adapters.llm.mlx_lm.resolve_cached_model_reference",
+            side_effect=lambda model_repo: model_repo,
         ):
-            chunks = []
+            with patch(
+                "jarvis.adapters.llm.mlx_lm.importlib.import_module",
+                return_value=fake_module,
+            ):
+                chunks = []
 
-            async def consume():
+                async def consume():
+                    async for chunk in adapter.chat_stream(
+                        messages=[Message(role=Role.USER, content="Oi")],
+                        tools=[],
+                        max_kv_size=64,
+                    ):
+                        chunks.append(chunk)
+                        if len(chunks) == 1:
+                            await adapter.cancel_current_response()
+
+                await consume()
+
+        assert chunks == ["Primeiro "]
+
+    async def test_chat_stream_strips_thinking_traces_from_visible_output(self):
+        adapter = MLXLMAdapter(model_repo="mlx-community/test-model")
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, add_generation_prompt, tokenize):
+                del messages, add_generation_prompt, tokenize
+                return "PROMPT"
+
+        def fake_load(model_repo):
+            del model_repo
+            return object(), FakeTokenizer()
+
+        def fake_stream_generate(model, tokenizer, prompt, max_tokens, max_kv_size):
+            del model, tokenizer, prompt, max_tokens, max_kv_size
+            yield types.SimpleNamespace(text="<think>")
+            yield types.SimpleNamespace(text="analise interna")
+            yield types.SimpleNamespace(text="</think>Resposta limpa")
+
+        fake_module = types.SimpleNamespace(
+            load=fake_load, stream_generate=fake_stream_generate
+        )
+
+        with patch(
+            "jarvis.adapters.llm.mlx_lm.resolve_cached_model_reference",
+            side_effect=lambda model_repo: model_repo,
+        ):
+            with patch(
+                "jarvis.adapters.llm.mlx_lm.importlib.import_module",
+                return_value=fake_module,
+            ):
+                chunks = []
                 async for chunk in adapter.chat_stream(
                     messages=[Message(role=Role.USER, content="Oi")],
                     tools=[],
                     max_kv_size=64,
                 ):
                     chunks.append(chunk)
-                    if len(chunks) == 1:
-                        await adapter.cancel_current_response()
 
-            await consume()
-
-        assert chunks == ["Primeiro "]
+        assert chunks == ["Resposta limpa"]
 
 
 @pytest.mark.asyncio
@@ -168,13 +224,56 @@ class TestMLXAudioKokoroAdapter:
 
         fake_model = FakeModel()
         fake_module = types.SimpleNamespace(load_model=lambda model_repo: fake_model)
-        with patch.dict("sys.modules", {"mlx_audio.tts.utils": fake_module}):
+        with patch.dict(
+            "sys.modules",
+            {
+                "mlx_audio.tts.utils": fake_module,
+                "misaki": ModuleType("misaki"),
+                "num2words": ModuleType("num2words"),
+                "spacy": ModuleType("spacy"),
+            },
+        ):
             chunks = []
             async for chunk in adapter.synthesize_stream("ola mundo"):
                 chunks.append(chunk)
 
         assert chunks == [b"audio-bytes"]
         assert fake_model.last_request == ("ola mundo", "pm_santa", "p")
+
+
+@pytest.mark.asyncio
+class TestFallbackTTSAdapter:
+    async def test_falls_back_to_avspeech_when_primary_fails_before_audio(self):
+        primary = MLXAudioKokoroAdapter(
+            model_repo="mlx-community/Kokoro-82M-bf16",
+            voice="pm_santa",
+            lang_code="p",
+        )
+        fallback = AVSpeechAdapter()
+        adapter = FallbackTTSAdapter(
+            primary,
+            fallback,
+            primary_name="mlx_audio_kokoro",
+            fallback_name="avspeech",
+        )
+
+        with patch.object(
+            primary,
+            "synthesize_stream",
+            side_effect=RuntimeError("tts backend exploded"),
+        ):
+            with patch.object(fallback, "synthesize_stream") as fallback_stream:
+
+                async def generate(text: str):
+                    del text
+                    yield b"fallback-audio"
+
+                fallback_stream.side_effect = generate
+                chunks = []
+                async for chunk in adapter.synthesize_stream("ola mundo"):
+                    chunks.append(chunk)
+
+        assert chunks == [b"fallback-audio"]
 
 
 class TestAVSpeechAdapter:

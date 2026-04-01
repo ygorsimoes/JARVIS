@@ -13,11 +13,13 @@
 ## Instalação
 
 ```bash
-uv sync
+brew bundle
+uv sync --extra macos-runtime
 cp .env.example .env
 swiftlint lint --config .swiftlint.yml
 swift build -c release --package-path bridges/apple/SpeechAnalyzerCLI
 swift build -c release --package-path bridges/apple/FoundationModelsBridge
+uv run jarvis --doctor
 ```
 
 ## Permissões
@@ -36,6 +38,4 @@ uv run jarvis --demo "Que horas sao agora?"
 
 ## Modo de desenvolvimento
 
-```bash
-uv run jarvis --mock-backends --interactive
-```
+`Foundation Models` continua opcional. Se o hot path nativo estiver indisponivel, o runtime deve degradar para o fallback local configurado.

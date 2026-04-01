@@ -36,6 +36,7 @@ class PolicyEngine:
             backend.startswith("mlx")
             for backend in (
                 self._config.llm_hot_path,
+                self._config.llm_hot_path_fallback,
                 self._config.llm_deliberative,
                 self._config.tts_backend,
             )
@@ -100,16 +101,20 @@ class PolicyEngine:
             backend_name=deliberative_backend_name,
             target=RouteTarget.DELIBERATIVE,
         )
-        cloud_candidate = _BackendCandidate(
+        fallback_target = self._fallback_target(route.target, fallback_backend_name)
+        fallback_candidate = _BackendCandidate(
             adapter=fallback_adapter,
             backend_name=fallback_backend_name,
-            target=RouteTarget.DELIBERATIVE,
+            target=fallback_target,
         )
 
         if route.target == RouteTarget.HOT_PATH:
-            candidates = [hot_candidate, deliberative_candidate, cloud_candidate]
+            if self._is_local_mlx_backend(fallback_backend_name):
+                candidates = [hot_candidate, fallback_candidate, deliberative_candidate]
+            else:
+                candidates = [hot_candidate, deliberative_candidate, fallback_candidate]
         else:
-            candidates = [deliberative_candidate, hot_candidate, cloud_candidate]
+            candidates = [deliberative_candidate, fallback_candidate, hot_candidate]
 
         if not self._enable_native_backends:
             return [candidates[0]]
@@ -142,3 +147,16 @@ class PolicyEngine:
             requested_target.value,
             candidate.backend_name,
         )
+
+    @staticmethod
+    def _is_local_mlx_backend(backend_name: str) -> bool:
+        return backend_name.startswith("mlx")
+
+    def _fallback_target(
+        self, requested_target: RouteTarget, fallback_backend_name: str
+    ) -> RouteTarget:
+        if requested_target == RouteTarget.HOT_PATH and self._is_local_mlx_backend(
+            fallback_backend_name
+        ):
+            return RouteTarget.HOT_PATH
+        return RouteTarget.DELIBERATIVE

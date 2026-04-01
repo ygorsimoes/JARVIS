@@ -104,6 +104,17 @@ class FoundationModelsBridgeAdapter:
         self._owns_process = False
 
     async def healthcheck(self) -> bool:
+        if await self._raw_healthcheck():
+            return True
+        if not self.bridge_binary_path:
+            return False
+        try:
+            await self._ensure_service_running()
+        except RuntimeError:
+            return False
+        return await self._raw_healthcheck()
+
+    async def _raw_healthcheck(self) -> bool:
         request = urllib.request.Request("%s/health" % self.base_url, method="GET")
         try:
             response = await asyncio.to_thread(self._open_request, request)
@@ -166,6 +177,8 @@ class FoundationModelsBridgeAdapter:
                                 raise RuntimeError(
                                     "bridge requested tool execution without a tool invoker"
                                 )
+                            invoke = tool_invoker
+                            assert invoke is not None
                             tool_name = event.get("name")
                             if not isinstance(tool_name, str) or not tool_name:
                                 raise RuntimeError(
@@ -185,7 +198,7 @@ class FoundationModelsBridgeAdapter:
                                 )
 
                             async def invoke_tool() -> object:
-                                return await tool_invoker(tool_name, args)
+                                return await invoke(tool_name, args)
 
                             future = asyncio.run_coroutine_threadsafe(
                                 invoke_tool(),
@@ -250,13 +263,13 @@ class FoundationModelsBridgeAdapter:
         return True
 
     async def _ensure_service_running(self) -> None:
-        if await self.healthcheck():
+        if await self._raw_healthcheck():
             return
         if not self.bridge_binary_path:
             return
 
         async with self._startup_lock:
-            if await self.healthcheck():
+            if await self._raw_healthcheck():
                 return
 
             binary = Path(self.bridge_binary_path)
@@ -280,7 +293,7 @@ class FoundationModelsBridgeAdapter:
                 self._stderr_task = asyncio.create_task(self._drain_stderr())
 
             for _ in range(40):
-                if await self.healthcheck():
+                if await self._raw_healthcheck():
                     return
                 await asyncio.sleep(0.25)
 

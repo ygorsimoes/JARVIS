@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import sqlite3
 import struct
 import uuid
@@ -71,6 +72,11 @@ def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _normalize_fts_query(query: str) -> str:
+    tokens = re.findall(r"[\wÀ-ÿ]+", query, flags=re.UNICODE)
+    return " ".join(tokens)
+
+
 def _serialize_f32(vector: List[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
 
@@ -134,6 +140,7 @@ class MemoryStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._vec_available = False
         self._init_lock = asyncio.Lock()
+        self._pending_embedding_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -147,6 +154,8 @@ class MemoryStore:
             await asyncio.to_thread(self._sync_open)
 
     async def close(self) -> None:
+        if self._pending_embedding_tasks:
+            await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
         if self._conn is not None:
             await asyncio.to_thread(self._conn.close)
             self._conn = None
@@ -180,7 +189,9 @@ class MemoryStore:
         )
         await asyncio.to_thread(self._sync_insert, memory_id, memory)
         # Embed asynchronously — fire and forget to avoid blocking the caller.
-        asyncio.create_task(self._embed_and_store(memory_id, content))
+        task = asyncio.create_task(self._embed_and_store(memory_id, content))
+        self._pending_embedding_tasks.add(task)
+        task.add_done_callback(self._pending_embedding_tasks.discard)
         return memory
 
     async def delete(self, memory_id: str) -> None:
@@ -196,10 +207,15 @@ class MemoryStore:
 
         This is the primary retrieval path for the hot path (Foundation Models).
         """
-        if not query.strip():
+        normalized_query = _normalize_fts_query(query)
+        if not normalized_query:
             return []
         await self._ensure_open()
-        return await asyncio.to_thread(self._sync_fts_search, query, top_k)
+        return await asyncio.to_thread(
+            self._sync_fts_search,
+            normalized_query,
+            top_k,
+        )
 
     async def search_semantic(self, query: str, top_k: int = 5) -> List[Memory]:
         """Semantic kNN search via sqlite-vec.
@@ -327,8 +343,8 @@ class MemoryStore:
             FROM memories m
             JOIN memories_vec v ON m.id = v.memory_id
             WHERE v.embedding MATCH ?
+              AND k = ?
             ORDER BY distance
-            LIMIT ?
             """,
             (query_bytes, candidate_limit),
         ).fetchall()
