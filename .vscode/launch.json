@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/swift/SpeechAnalyzerCLI",
+            "name": "Debug speechanalyzer-cli (swift/SpeechAnalyzerCLI)",
+            "target": "speechanalyzer-cli",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug speechanalyzer-cli (swift/SpeechAnalyzerCLI)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/swift/SpeechAnalyzerCLI",
+            "name": "Release speechanalyzer-cli (swift/SpeechAnalyzerCLI)",
+            "target": "speechanalyzer-cli",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release speechanalyzer-cli (swift/SpeechAnalyzerCLI)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/swift/FoundationModelsBridge",
+            "name": "Debug foundation-models-bridge (swift/FoundationModelsBridge)",
+            "target": "foundation-models-bridge",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug foundation-models-bridge (swift/FoundationModelsBridge)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/swift/FoundationModelsBridge",
+            "name": "Release foundation-models-bridge (swift/FoundationModelsBridge)",
+            "target": "foundation-models-bridge",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release foundation-models-bridge (swift/FoundationModelsBridge)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/bridges/apple/FoundationModelsBridge",
+            "name": "Debug foundation-models-bridge (bridges/apple/FoundationModelsBridge)",
+            "target": "foundation-models-bridge",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug foundation-models-bridge (bridges/apple/FoundationModelsBridge)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:J.A.R.V.I.S}/bridges/apple/FoundationModelsBridge",
+            "name": "Release foundation-models-bridge (bridges/apple/FoundationModelsBridge)",
+            "target": "foundation-models-bridge",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release foundation-models-bridge (bridges/apple/FoundationModelsBridge)"
+        }
+    ]
+}

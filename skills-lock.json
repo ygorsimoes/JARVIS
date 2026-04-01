@@ -26,6 +26,11 @@
       "sourceType": "github",
       "computedHash": "1a7009e7e16fd08c201f4a527a44d4f0d9d1d892b15b92ab3492624b23be22b8"
     },
+    "ruff": {
+      "source": "astral-sh/claude-code-plugins",
+      "sourceType": "github",
+      "computedHash": "905f1c2b66e722ab534d7cbeceafb6ee37d32e3bfe51f3e68c661c51eb19a776"
+    },
     "swift-expert": {
       "source": "jeffallan/claude-skills",
       "sourceType": "github",

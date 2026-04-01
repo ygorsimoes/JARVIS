@@ -22,9 +22,9 @@ jobs:
       matrix:
         include:
           - package_name: SpeechAnalyzerCLI
-            package_path: swift/SpeechAnalyzerCLI
+            package_path: bridges/apple/SpeechAnalyzerCLI
           - package_name: FoundationModelsBridge
-            package_path: swift/FoundationModelsBridge
+            package_path: bridges/apple/FoundationModelsBridge
 
     steps:
       - name: Checkout repository

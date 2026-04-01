@@ -1,0 +1,46 @@
+// swift-tools-version: 6.2
+
+import PackageDescription
+
+let package = Package(
+    name: "FoundationModelsBridge",
+    platforms: [
+        .macOS(.v26),
+    ],
+    products: [
+        .executable(name: "foundation-models-bridge", targets: ["FoundationModelsBridge"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.0"),
+        .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.19.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
+        .package(
+            url: "https://github.com/swiftlang/swift-testing.git",
+            branch: "release/6.2"
+        ),
+    ],
+    targets: [
+        .target(
+            name: "FoundationModelsBridgeCore",
+            path: "Sources/FoundationModelsBridgeCore"
+        ),
+        .executableTarget(
+            name: "FoundationModelsBridge",
+            dependencies: [
+                "FoundationModelsBridgeCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            path: "Sources/FoundationModelsBridge"
+        ),
+        .testTarget(
+            name: "FoundationModelsBridgeCoreTests",
+            dependencies: [
+                "FoundationModelsBridgeCore",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            path: "Tests/FoundationModelsBridgeCoreTests"
+        ),
+    ]
+)

@@ -6,11 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "jarvis"
 version = "0.1.0"
 description = "Local-first conversational runtime for J.A.R.V.I.S."
-readme = "JARVIS.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
+    "structlog>=24.4,<26",
 ]
 
 [dependency-groups]
@@ -18,6 +19,8 @@ dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<1",
     "pytest-cov>=5,<7",
+    "pytest-mock>=3.14,<4",
+    "ruff>=0.11,<0.13",
 ]
 
 [project.optional-dependencies]
@@ -48,19 +51,29 @@ http = [
 [project.scripts]
 jarvis = "jarvis.main:main"
 
+[tool.setuptools.package-dir]
+"" = "src"
+
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["jarvis*"]
 
 [tool.uv]
 default-groups = ["dev"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/python"]
 asyncio_mode = "strict"
+python_files = ["test_*.py"]
+markers = [
+    "unit: fast unit tests",
+    "integration: integration tests spanning multiple components",
+    "e2e: end-to-end workflow tests",
+]
 
 [tool.coverage.run]
 branch = true
-source = ["jarvis"]
+source = ["src/jarvis"]
 omit = [
     "tests/*",
 ]
@@ -73,3 +86,13 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+[tool.ruff]
+src = ["src", "tests/python"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/python/**/*.py" = ["B011"]
