@@ -73,3 +73,20 @@ class TestTurnManager:
         assert completed is not None
         assert completed.text == "Isso fecha uma frase."
         assert completed.metadata["silence_duration_ms"] == 250
+
+    def test_commits_partial_after_silence_without_explicit_vad_events(self):
+        manager = TurnManager(
+            TurnManagerConfig(
+                silence_timeout_ms=120,
+                partial_commit_min_chars=10,
+                partial_stability_ms=60,
+            )
+        )
+
+        manager.consume_partial_transcript("Olá, tudo bem contigo?", now=0.0)
+
+        completed = manager.tick(now=0.2)
+
+        assert completed is not None
+        assert completed.text == "Olá, tudo bem contigo?"
+        assert completed.used_partial

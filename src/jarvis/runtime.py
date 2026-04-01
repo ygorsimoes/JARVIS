@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Iterable, List, Optional
+from typing import AsyncIterator, Callable, Iterable, List, Optional
 
 from .adapters import build_runtime_adapters
 from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
@@ -238,6 +239,19 @@ class JarvisRuntime:
             if not activated:
                 continue
 
+            partial_state = {"text": "", "printed": False}
+
+            def on_partial_transcript(text: str) -> None:
+                normalized = text.strip()
+                if not normalized or normalized == partial_state["text"]:
+                    return
+                partial_state["text"] = normalized
+                partial_state["printed"] = True
+                if sys.stdout.isatty():
+                    print("voce~> %s" % normalized, end="\r", flush=True)
+                else:
+                    print("voce~> %s" % normalized)
+
             await self._publish_event(
                 EventType.ACTIVATION_TRIGGERED,
                 {"source": "foreground"},
@@ -246,11 +260,17 @@ class JarvisRuntime:
             )
 
             try:
-                voice_turn = await self.capture_voice_turn()
+                voice_turn = await self.capture_voice_turn(
+                    on_partial_transcript=on_partial_transcript
+                )
             except VoiceCaptureError as exc:
+                if partial_state["printed"] and sys.stdout.isatty():
+                    print("", flush=True)
                 print("jarvis> %s" % exc)
                 handled_turns += 1
                 continue
+            if partial_state["printed"] and sys.stdout.isatty():
+                print("", flush=True)
             print("voce> %s" % voice_turn.text)
             pipeline = SpeechPipeline(
                 tts_adapter=self.tts_adapter,
@@ -321,7 +341,10 @@ class JarvisRuntime:
         finally:
             await session.stop()
 
-    async def capture_voice_turn(self) -> CapturedVoiceTurn:
+    async def capture_voice_turn(
+        self,
+        on_partial_transcript: Callable[[str], None] | None = None,
+    ) -> CapturedVoiceTurn:
         turn_id = str(uuid.uuid4())
         turn_manager = TurnManager(self.turn_manager_config)
         saw_speech_signal = False
@@ -378,6 +401,8 @@ class JarvisRuntime:
                     event_type == "partial_transcript"
                     and str(event.get("text") or "").strip()
                 ):
+                    if on_partial_transcript is not None:
+                        on_partial_transcript(str(event.get("text") or ""))
                     saw_partial_transcript = True
                     saw_speech_signal = True
                 completed_turn = self._consume_turn_signal(turn_manager, event)
@@ -576,7 +601,7 @@ class JarvisRuntime:
         return True
 
     async def _stream_llm_sentences(self, adapter, messages) -> AsyncIterator[str]:
-        sentence_streamer = SentenceStreamer(self.sentence_streamer.config)
+        sentence_streamer = SentenceStreamer(self._sentence_streamer_config())
         queue: asyncio.Queue = asyncio.Queue()
         pump_task = asyncio.create_task(
             sentence_streamer.pump(
@@ -599,6 +624,17 @@ class JarvisRuntime:
                 yield item
         finally:
             await pump_task
+
+    def _sentence_streamer_config(self) -> SentenceStreamerConfig:
+        config = self.sentence_streamer.config
+        if self._active_turn is None or self._active_turn.mode != "voice":
+            return config
+        return SentenceStreamerConfig(
+            min_dispatch_tokens=min(config.min_dispatch_tokens, 4),
+            min_soft_boundary_chars=min(config.min_soft_boundary_chars, 24),
+            max_pending_segments=config.max_pending_segments,
+            backpressure_poll_interval_s=config.backpressure_poll_interval_s,
+        )
 
     async def _stream_response_chunks(
         self,

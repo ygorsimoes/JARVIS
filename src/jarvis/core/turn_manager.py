@@ -110,10 +110,14 @@ class TurnManager:
     ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         self.last_event_at_monotonic = now
+        if self.started_at_monotonic is None:
+            self.started_at_monotonic = now
         normalized = self._normalized_text(text)
         if normalized:
             self.partial_text = normalized
             self.last_partial_at_monotonic = now
+            if not self.speech_active:
+                self.silence_started_at_monotonic = now
         return self._maybe_complete_for_max_duration(now)
 
     def consume_final_transcript(
@@ -121,6 +125,8 @@ class TurnManager:
     ) -> Optional[CompletedTurn]:
         now = now if now is not None else time.monotonic()
         self.last_event_at_monotonic = now
+        if self.started_at_monotonic is None:
+            self.started_at_monotonic = now
         normalized = self._normalized_text(text)
         if normalized:
             self.final_text = normalized

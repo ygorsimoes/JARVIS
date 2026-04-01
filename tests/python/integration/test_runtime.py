@@ -248,6 +248,24 @@ class TestRuntime:
         assert turn.text == "Olá, tudo bem?"
         assert self.runtime.state_machine.state == JarvisState.TRANSCRIBING
 
+    async def test_capture_voice_turn_reports_partial_updates(self):
+        self.runtime.stt_adapter = FakeSTTAdapter(
+            [
+                {"type": "ready", "locale": "pt-BR", "sample_rate": 16000},
+                {"type": "partial_transcript", "text": "olá"},
+                {"type": "partial_transcript", "text": "olá tudo bem"},
+                {"type": "final_transcript", "text": "Olá, tudo bem?"},
+            ]
+        )
+        partials = []
+
+        turn = await self.runtime.capture_voice_turn(
+            on_partial_transcript=partials.append
+        )
+
+        assert partials == ["olá", "olá tudo bem"]
+        assert turn.text == "Olá, tudo bem?"
+
     async def test_capture_voice_turn_surfaces_stt_error_message(self):
         self.runtime.stt_adapter = FakeSTTAdapter(
             [{"type": "error", "message": "microphone_permission_denied"}]
@@ -288,6 +306,26 @@ class TestRuntime:
         assert any(line.startswith("jarvis>") for line in printed_lines)
         assert self.runtime.playback_backend.played
         assert self.runtime.state_machine.state == JarvisState.IDLE
+
+    async def test_run_voice_foreground_prints_partial_transcripts(self):
+        self.runtime.activation_adapter = FakeActivationAdapter([True])
+        self.runtime.stt_adapter = FakeSTTAdapter(
+            [
+                {"type": "ready", "locale": "pt-BR", "sample_rate": 16000},
+                {"type": "partial_transcript", "text": "olá"},
+                {"type": "partial_transcript", "text": "olá tudo bem"},
+                {"type": "final_transcript", "text": "Olá, tudo bem?"},
+            ]
+        )
+        self.runtime.playback_backend = FakePlaybackBackend()
+
+        with patch("builtins.print") as print_mock:
+            with patch("sys.stdout.isatty", return_value=False):
+                await self.runtime.run_voice_foreground(turn_limit=1)
+
+        printed_lines = [call.args[0] for call in print_mock.call_args_list]
+        assert any(line.startswith("voce~>") for line in printed_lines)
+        assert any(line.startswith("voce>") for line in printed_lines)
 
     async def test_run_voice_foreground_reports_capture_failures_without_traceback(
         self,
