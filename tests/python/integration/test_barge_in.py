@@ -7,7 +7,7 @@ import pytest_asyncio
 from jarvis.adapters.stt.speech_analyzer import SpeechAnalyzerStreamError
 from jarvis.config import JarvisConfig
 from jarvis.core.speech_pipeline import SpeechPipeline
-from jarvis.runtime import JarvisRuntime
+from jarvis.runtime import JarvisRuntime, SpeechEventStream
 
 
 class FakeSTTSession:
@@ -128,3 +128,35 @@ class TestBargeInWatcher:
         self.runtime.interrupt_current_turn.assert_called_once_with(reason="barge-in")
         assert self.runtime.stt_adapter.vad_attempts == 1
         task.cancel()
+
+    async def test_watcher_reuses_handoff_stream_when_provided(self):
+        self.runtime.vad_adapter = FakeVADAdapter()
+        self.runtime.interrupt_current_turn = AsyncMock(return_value=True)
+
+        async def dummy_response():
+            await asyncio.sleep(1.0)
+
+        task = asyncio.create_task(dummy_response())
+        pipeline = MagicMock(spec=SpeechPipeline)
+        session = FakeSTTSession(
+            [
+                {"type": "other_event"},
+                {"type": "speech", "classified": {"speech_detected": True}},
+            ]
+        )
+        event_stream = await SpeechEventStream.open(session)
+
+        await self.runtime._barge_in_watcher(
+            task,
+            pipeline,
+            event_stream=event_stream,
+        )
+
+        self.runtime.interrupt_current_turn.assert_called_once_with(reason="barge-in")
+        assert self.runtime._pending_voice_stream is event_stream
+        await event_stream.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

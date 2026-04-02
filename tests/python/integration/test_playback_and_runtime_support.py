@@ -16,6 +16,7 @@ class TestPlaybackBackend:
     async def test_noop_backend_methods_complete(self):
         backend = NoOpPlaybackBackend()
         await backend.play(b"audio", 24000)
+        await backend.flush()
         await backend.stop()
         await backend.shutdown()
 
@@ -42,24 +43,47 @@ class TestPlaybackBackend:
         class FakeArray:
             size = 2
 
+            def copy(self):
+                return self
+
+        class FakeStream:
+            def start(self):
+                events.append(("start",))
+
+            def write(self, array):
+                events.append(("write", array.size))
+
+            def abort(self):
+                events.append(("abort",))
+
+            def close(self):
+                events.append(("close",))
+
         fake_numpy = types.SimpleNamespace(
             frombuffer=lambda audio_bytes, dtype: FakeArray(), float32="float32"
         )
         fake_sounddevice = types.SimpleNamespace(
-            play=lambda array, sample_rate_hz, blocking: events.append(
-                ("play", sample_rate_hz, blocking, array.size)
-            ),
             stop=lambda: events.append(("stop",)),
+            OutputStream=lambda samplerate, channels, dtype: (
+                events.append(("stream", samplerate, channels, dtype)) or FakeStream()
+            ),
         )
 
         with patch.object(
             backend, "_ensure_dependencies", return_value=(fake_sounddevice, fake_numpy)
         ):
             await backend.play(b"audio", 24000)
+            await backend.flush()
             await backend.stop()
             await backend.shutdown()
 
-        assert events == [("play", 24000, True, 2), ("stop",), ("stop",)]
+        assert events == [
+            ("stream", 24000, 1, "float32"),
+            ("start",),
+            ("write", 2),
+            ("abort",),
+            ("close",),
+        ]
 
 
 @pytest.mark.asyncio

@@ -182,6 +182,7 @@ class SpeechPipeline:
                         item.audio_bytes, self.sample_rate_hz
                     )
                 if item.is_last_chunk and not self._stopped:
+                    await self.playback_backend.flush()
                     await self._publish(
                         EventType.PLAYBACK_COMPLETED,
                         {"utterance_id": self.utterance_id, "index": item.index},

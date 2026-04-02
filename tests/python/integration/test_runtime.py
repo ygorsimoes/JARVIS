@@ -67,8 +67,10 @@ class FailingSTTSession:
 class FakeSTTAdapter:
     def __init__(self, events):
         self.events = events
+        self.live_session_calls = 0
 
     async def start_live_session(self):
+        self.live_session_calls += 1
         session_events = self.events
         self.events = []  # O watcher não ver eventos
         return FakeSTTSession(session_events)
@@ -79,11 +81,15 @@ class SequencedSTTAdapter:
         self.live_sessions = [list(events) for events in live_sessions]
         self.vad_sessions = [list(events) for events in (vad_sessions or [])]
         self.vad_delay_s = vad_delay_s
+        self.live_session_calls = 0
+        self.vad_session_calls = 0
 
     async def start_live_session(self):
+        self.live_session_calls += 1
         return FakeSTTSession(self.live_sessions.pop(0))
 
     async def start_vad_session(self):
+        self.vad_session_calls += 1
         if not self.vad_sessions:
             return FakeSTTSession([])
         return DelayedSTTSession(self.vad_sessions.pop(0), self.vad_delay_s)
@@ -111,10 +117,14 @@ class FailingSTTAdapter:
 class FakePlaybackBackend:
     def __init__(self):
         self.played = []
+        self.flush_calls = 0
         self.stop_calls = 0
 
     async def play(self, audio_bytes: bytes, sample_rate_hz: int) -> None:
         self.played.append((audio_bytes, sample_rate_hz))
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -289,6 +299,24 @@ class TestRuntime:
         assert turn.text == "Que horas sao agora?"
         assert self.runtime.state_machine.state == JarvisState.TRANSCRIBING
 
+    async def test_capture_voice_turn_keeps_followup_stream_when_session_stays_open(
+        self,
+    ):
+        self.runtime.stt_adapter = FakeSTTAdapter(
+            [
+                {"type": "speech_started"},
+                {"type": "partial_transcript", "text": "que horas sao"},
+                {"type": "speech_ended"},
+                {"type": "final_transcript", "text": "Que horas sao agora?"},
+                {"type": "other_event"},
+            ]
+        )
+
+        turn = await self.runtime.capture_voice_turn()
+
+        assert turn.followup_stream is not None
+        await turn.followup_stream.stop()
+
     async def test_capture_voice_turn_survives_short_silence_after_ready(self):
         delay_s = self.runtime.turn_manager_config.tick_interval_ms / 1000.0 * 1.5
         self.runtime.stt_adapter = DelayedSTTAdapter(
@@ -396,21 +424,12 @@ class TestRuntime:
                     {"type": "partial_transcript", "text": "me lembra do resumo"},
                     {"type": "speech_ended"},
                     {"type": "final_transcript", "text": "Me lembra do resumo"},
-                ],
-                [
                     {"type": "speech_started"},
                     {"type": "partial_transcript", "text": "que horas sao"},
                     {"type": "speech_ended"},
                     {"type": "final_transcript", "text": "Que horas sao agora?"},
                 ],
             ],
-            vad_sessions=[
-                [
-                    {"type": "other_event"},
-                    {"type": "speech_started"},
-                ]
-            ],
-            vad_delay_s=0.05,
         )
         self.runtime.hot_path_adapter = SlowHotPathAdapter()
         self.runtime.playback_backend = FakePlaybackBackend()
@@ -420,10 +439,16 @@ class TestRuntime:
 
         printed_lines = [call.args[0] for call in print_mock.call_args_list]
         assert activation.calls == 1
-        assert self.runtime.hot_path_adapter.cancelled
+        assert self.runtime.stt_adapter.live_session_calls == 1
+        assert self.runtime.stt_adapter.vad_session_calls == 0
         assert sum(1 for line in printed_lines if line.startswith("voce>")) == 2
         assert any(
             "Agora sao" in line for line in printed_lines if line.startswith("jarvis>")
+        )
+        assert not any(
+            "Primeira frase completa" in line
+            for line in printed_lines
+            if line.startswith("jarvis>")
         )
         assert self.runtime.state_machine.state == JarvisState.IDLE
 

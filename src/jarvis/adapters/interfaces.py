@@ -16,7 +16,7 @@ from ..models.memory import Memory
 
 @runtime_checkable
 class STTSession(Protocol):
-    async def iter_events(self) -> AsyncIterator[dict]: ...
+    def iter_events(self) -> AsyncIterator[dict]: ...
 
     async def stop(self) -> None: ...
 
@@ -25,14 +25,14 @@ class STTSession(Protocol):
 class STTAdapter(Protocol):
     async def start_live_session(self) -> STTSession: ...
 
-    async def transcribe_stream(self) -> AsyncIterator[str]: ...
+    def transcribe_stream(self) -> AsyncIterator[str]: ...
 
     async def shutdown(self) -> None: ...
 
 
 @runtime_checkable
 class LLMAdapter(Protocol):
-    async def chat_stream(
+    def chat_stream(
         self,
         messages: List[Message],
         tools: List[dict],
@@ -49,7 +49,7 @@ class LLMAdapter(Protocol):
 
 @runtime_checkable
 class TTSAdapter(Protocol):
-    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]: ...
+    def synthesize_stream(self, text: str) -> AsyncIterator[bytes]: ...
 
     async def shutdown(self) -> None: ...
 

@@ -37,6 +37,7 @@ class CancellableSlowFakeTTSAdapter(SlowFakeTTSAdapter):
 class FakePlaybackBackend:
     def __init__(self):
         self.played = []
+        self.flush_calls = 0
         self.stop_calls = 0
         self.shutdown_calls = 0
 
@@ -45,6 +46,9 @@ class FakePlaybackBackend:
 
     async def stop(self) -> None:
         self.stop_calls += 1
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
 
     async def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -89,6 +93,7 @@ class TestSpeechPipeline:
         assert tts.calls == ["Primeira frase.", "Segunda frase."]
         assert len(playback.played) == 2
         assert playback.played[0][1] == 24000
+        assert playback.flush_calls == 2
 
         events = [await subscription.get() for _ in range(4)]
         event_types = [event.event_type for event in events]
@@ -137,6 +142,7 @@ class TestSpeechPipeline:
             (b"Primeira frase.-chunk-1", 24000),
             (b"Primeira frase.-chunk-2", 24000),
         ]
+        assert playback.flush_calls == 1
         started_event = await subscription.get()
         completed_event = await subscription.get()
         assert started_event.event_type == EventType.PLAYBACK_STARTED

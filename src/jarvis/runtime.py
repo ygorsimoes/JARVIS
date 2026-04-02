@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Callable, Iterable, List, Mapping, Optional
+from typing import AsyncIterator, Callable, Iterable, List, Mapping, Optional, cast
 
 from .adapters import build_runtime_adapters
+from .adapters.interfaces import STTSession
 from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
 from .adapters.stt.speech_analyzer import SpeechAnalyzerStreamError
 from .bus import EventBus
@@ -73,6 +74,7 @@ class CapturedVoiceTurn:
     reason: str
     used_partial: bool
     metadata: dict
+    followup_stream: SpeechEventStream | None = None
 
 
 class VoiceCaptureError(RuntimeError):
@@ -89,6 +91,83 @@ class ActiveTurnExecution:
     route: RouteDecision | None = None
     backend_name: str | None = None
     interrupted: bool = False
+
+
+@dataclass
+class SpeechEventStream:
+    session: STTSession
+    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    pump_task: asyncio.Task | None = None
+    ended: bool = False
+    stopped: bool = False
+
+    @classmethod
+    async def open(cls, session: STTSession) -> SpeechEventStream:
+        stream = cls(session=session)
+        stream.pump_task = asyncio.create_task(
+            stream._pump(),
+            name="jarvis-speech-event-pump",
+        )
+        return stream
+
+    async def _pump(self) -> None:
+        try:
+            session = cast(STTSession, self.session)
+            async for event in session.iter_events():
+                await self.queue.put(event)
+        except Exception as exc:
+            await self.queue.put(exc)
+        finally:
+            self.ended = True
+            await self.queue.put(_SPEECH_STREAM_EOF)
+
+    async def next_event(self, timeout_s: float | None = None) -> dict:
+        getter = self.queue.get()
+        item = (
+            await asyncio.wait_for(getter, timeout=timeout_s)
+            if timeout_s is not None
+            else await getter
+        )
+        return self._coerce_next_item(item)
+
+    async def iter_events(self) -> AsyncIterator[dict]:
+        while True:
+            item = await self.queue.get()
+            if item is _SPEECH_STREAM_EOF:
+                return
+            if isinstance(item, Exception):
+                raise item
+            if not isinstance(item, dict):
+                raise RuntimeError("speech event stream emitted an invalid payload")
+            yield item
+
+    async def stop(self) -> None:
+        if self.stopped:
+            return
+        self.stopped = True
+        stop = getattr(self.session, "stop", None)
+        if stop is not None:
+            await stop()
+        if self.pump_task is not None:
+            results = await asyncio.gather(self.pump_task, return_exceptions=True)
+            self.pump_task = None
+            for result in results:
+                if isinstance(result, Exception) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
+
+    def _coerce_next_item(self, item: object) -> dict:
+        if item is _SPEECH_STREAM_EOF:
+            raise StopAsyncIteration
+        if isinstance(item, Exception):
+            raise item
+        if not isinstance(item, dict):
+            raise RuntimeError("speech event stream emitted an invalid payload")
+        return item
+
+
+_SPEECH_STREAM_EOF = object()
 
 
 class JarvisRuntime:
@@ -155,6 +234,7 @@ class JarvisRuntime:
         self._active_turn: ActiveTurnExecution | None = None
         self._pending_voice_pipeline: SpeechPipeline | None = None
         self._pending_voice_relisten = False
+        self._pending_voice_stream: SpeechEventStream | None = None
         self._trace_reporter: VoiceTraceReporter | None = None
         self._conversation_prepare_lock = asyncio.Lock()
         self._conversation_prepared = False
@@ -293,6 +373,8 @@ class JarvisRuntime:
                     else:
                         print("voce~> %s" % normalized)
 
+                handoff_stream: SpeechEventStream | None = None
+
                 await self._publish_event(
                     EventType.ACTIVATION_TRIGGERED,
                     {
@@ -305,12 +387,18 @@ class JarvisRuntime:
                     backend=self.activation_backend_name,
                 )
 
+                handoff_stream = (
+                    self._consume_pending_voice_stream() if handoff_capture else None
+                )
                 try:
                     voice_turn = await self.capture_voice_turn(
                         on_partial_transcript=on_partial_transcript,
                         turn_id=voice_turn_id,
+                        handoff_stream=handoff_stream,
                     )
                 except VoiceCaptureError as exc:
+                    if handoff_capture:
+                        await self._stop_voice_stream(handoff_stream)
                     if (
                         partial_state["printed"]
                         and sys.stdout.isatty()
@@ -360,8 +448,14 @@ class JarvisRuntime:
                     ),
                     name="jarvis-voice-response",
                 )
+                followup_stream = voice_turn.followup_stream
+                await self._wait_for_active_turn_binding(response_task)
                 barge_in_task = asyncio.create_task(
-                    self._barge_in_watcher(response_task),
+                    self._barge_in_watcher(
+                        response_task,
+                        pipeline,
+                        event_stream=followup_stream,
+                    ),
                     name="jarvis-barge-in-watcher",
                 )
                 try:
@@ -392,6 +486,11 @@ class JarvisRuntime:
                         await barge_in_task
                     except asyncio.CancelledError:
                         pass
+                    if (
+                        followup_stream is not None
+                        and self._pending_voice_stream is not followup_stream
+                    ):
+                        await self._stop_voice_stream(followup_stream)
                     await pipeline.shutdown()
 
                 if self._consume_pending_voice_relisten():
@@ -409,54 +508,123 @@ class JarvisRuntime:
         self,
         response_task: asyncio.Task,
         pipeline: SpeechPipeline | None = None,
+        event_stream: SpeechEventStream | None = None,
     ) -> None:
         """Monitora o VAD em paralelo durante SPEAKING/THINKING.
         Cancela response_task ao detectar fala."""
         del pipeline
         try:
-            async for event in self._iter_barge_in_events():
-                if response_task.done():
+            if event_stream is not None:
+                interrupted = await self._consume_barge_in_source(
+                    event_stream.iter_events(),
+                    response_task,
+                    handoff_stream=event_stream,
+                )
+                if interrupted or response_task.done():
                     return
-                classified = self.vad_adapter.classify_event(event)
-                if classified and classified["speech_detected"]:
-                    await self.interrupt_current_turn(reason="barge-in")
-                    return
+
+            await self._consume_barge_in_source(
+                self._iter_barge_in_events(),
+                response_task,
+            )
         except SpeechAnalyzerStreamError:
             # O watcher de barge-in eh auxiliar: se o bridge cair ou o binario
             # nao suportar o modo reduzido, preservamos o turno atual.
             return
 
+    async def _consume_barge_in_source(
+        self,
+        source: AsyncIterator[dict],
+        response_task: asyncio.Task,
+        *,
+        handoff_stream: SpeechEventStream | None = None,
+    ) -> bool:
+        async for event in source:
+            if response_task.done():
+                return False
+            classified = self.vad_adapter.classify_event(event)
+            if classified and classified["speech_detected"]:
+                if handoff_stream is not None:
+                    self._pending_voice_stream = handoff_stream
+                await self._interrupt_bound_voice_turn(
+                    response_task,
+                    reason="barge-in",
+                )
+                return True
+        return False
+
+    async def _interrupt_bound_voice_turn(
+        self,
+        response_task: asyncio.Task,
+        *,
+        reason: str,
+    ) -> bool:
+        for _ in range(20):
+            execution = self._active_turn
+            if (
+                execution is not None
+                and execution.response_task is response_task
+                and execution.adapter is not None
+            ):
+                return await self.interrupt_current_turn(reason=reason)
+            if response_task.done():
+                return False
+            await asyncio.sleep(0)
+
+        return await self.interrupt_current_turn(reason=reason)
+
+    async def _wait_for_active_turn_binding(self, response_task: asyncio.Task) -> None:
+        for _ in range(20):
+            execution = self._active_turn
+            if execution is not None and execution.response_task is response_task:
+                if execution.adapter is not None:
+                    return
+                if (
+                    execution.route is not None
+                    and execution.route.target == RouteTarget.DIRECT_TOOL
+                ):
+                    return
+            if response_task.done():
+                return
+            await asyncio.sleep(0)
+
     async def capture_voice_turn(
         self,
         on_partial_transcript: Callable[[str], None] | None = None,
         turn_id: Optional[str] = None,
+        handoff_stream: SpeechEventStream | None = None,
     ) -> CapturedVoiceTurn:
         turn_id = turn_id or str(uuid.uuid4())
         turn_manager = TurnManager(self.turn_manager_config)
         saw_speech_signal = False
         saw_partial_transcript = False
-        await self.state_machine.transition(JarvisState.ARMED, "activation accepted")
-        await self.state_machine.transition(
-            JarvisState.LISTENING, "voice capture started"
-        )
+        if (
+            handoff_stream is not None
+            and self.state_machine.state == JarvisState.INTERRUPTED
+        ):
+            await self.state_machine.transition(
+                JarvisState.LISTENING,
+                "voice capture resumed after interruption",
+            )
+        else:
+            await self.state_machine.transition(
+                JarvisState.ARMED,
+                "activation accepted",
+            )
+            await self.state_machine.transition(
+                JarvisState.LISTENING,
+                "voice capture started",
+            )
 
-        session = await self.stt_adapter.start_live_session()
+        event_stream = handoff_stream or await self._open_live_speech_stream()
         completed_turn: Optional[CompletedTurn] = None
-        pending_event_task: Optional[asyncio.Task] = None
+        handoff_to_caller = False
         try:
-            event_iterator = session.iter_events().__aiter__()
             while completed_turn is None:
                 try:
-                    if pending_event_task is None:
-                        pending_event_task = asyncio.create_task(
-                            event_iterator.__anext__(),
-                            name="jarvis-stt-next-event",
-                        )
-                    event = await asyncio.wait_for(
-                        asyncio.shield(pending_event_task),
-                        timeout=self.turn_manager_config.tick_interval_ms / 1000.0,
+                    event = await event_stream.next_event(
+                        timeout_s=self.turn_manager_config.tick_interval_ms / 1000.0
                     )
-                    pending_event_task = None
                 except SpeechAnalyzerStreamError as exc:
                     raise VoiceCaptureError(
                         "erro no reconhecimento de voz: %s" % exc
@@ -534,18 +702,16 @@ class JarvisRuntime:
                 reason=completed_turn.reason,
                 used_partial=completed_turn.used_partial,
                 metadata=dict(completed_turn.metadata),
+                followup_stream=event_stream,
             )
         except Exception as exc:
             await self._handle_turn_failure(exc, input_text=None)
             raise
         finally:
-            if pending_event_task is not None and not pending_event_task.done():
-                pending_event_task.cancel()
-                try:
-                    await pending_event_task
-                except (asyncio.CancelledError, StopAsyncIteration):
-                    pass
-            await session.stop()
+            if completed_turn is not None:
+                handoff_to_caller = True
+            if not handoff_to_caller:
+                await self._stop_voice_stream(event_stream)
 
     async def stream_transcribed_turn(
         self,
@@ -743,7 +909,14 @@ class JarvisRuntime:
                     raise item
                 yield item
         finally:
-            await pump_task
+            if not pump_task.done():
+                pump_task.cancel()
+            results = await asyncio.gather(pump_task, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
 
     def _sentence_streamer_config(self) -> SentenceStreamerConfig:
         config = self.sentence_streamer.config
@@ -889,7 +1062,11 @@ class JarvisRuntime:
             speaking_started = False
             index = 0
             async for sentence in self._stream_llm_sentences(adapter, messages):
+                if self._active_turn is not None and self._active_turn.interrupted:
+                    return
                 if not speaking_started:
+                    if self._active_turn is not None and self._active_turn.interrupted:
+                        return
                     await self.state_machine.transition(
                         JarvisState.SPEAKING, "first sentence ready"
                     )
@@ -1016,7 +1193,7 @@ class JarvisRuntime:
             yield event
 
     async def _iter_session_events(self, start_session) -> AsyncIterator[dict]:
-        session = await start_session()
+        session = await SpeechEventStream.open(await start_session())
         try:
             async for event in session.iter_events():
                 yield event
@@ -1053,6 +1230,11 @@ class JarvisRuntime:
     def _consume_pending_voice_relisten(self) -> bool:
         pending = self._pending_voice_relisten
         self._pending_voice_relisten = False
+        return pending
+
+    def _consume_pending_voice_stream(self) -> SpeechEventStream | None:
+        pending = self._pending_voice_stream
+        self._pending_voice_stream = None
         return pending
 
     async def _pump_turn_chunks_to_queue(
@@ -1576,6 +1758,17 @@ class JarvisRuntime:
                 adapter=adapter.__class__.__name__,
                 error=str(exc),
             )
+
+    async def _open_live_speech_stream(self) -> SpeechEventStream:
+        return await SpeechEventStream.open(await self.stt_adapter.start_live_session())
+
+    async def _stop_voice_stream(self, stream: SpeechEventStream | None) -> None:
+        if stream is None:
+            return
+        try:
+            await stream.stop()
+        except SpeechAnalyzerStreamError:
+            return
 
     @staticmethod
     def _default_capabilities(config: JarvisConfig) -> list:
