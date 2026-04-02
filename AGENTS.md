@@ -7,7 +7,6 @@ Prefer existing patterns over inventing new abstractions.
 
 ## Repo Snapshot
 - Project: J.A.R.V.I.S., a local-first assistant runtime.
-- Architecture reference: `docs/architecture/JARVIS.md`.
 - Python app code: `src/jarvis/`.
 - Python tests: `tests/python/` with `unit`, `integration`, and `e2e` splits.
 - Swift bridges: `bridges/apple/SpeechAnalyzerCLI/` and `bridges/apple/FoundationModelsBridge/`.
@@ -19,7 +18,6 @@ No `.cursorrules`, `.cursor/rules/`, or `.github/copilot-instructions.md` files 
 If any of those files are added later, treat them as higher-priority local instructions.
 
 ## Important Paths
-- `docs/architecture/JARVIS.md`: source-of-truth architecture document.
 - `src/jarvis/config.py`: Pydantic settings model.
 - `src/jarvis/runtime.py`: main runtime orchestration.
 - `src/jarvis/adapters/interfaces.py`: adapter `Protocol` contracts.
@@ -148,7 +146,6 @@ swift test --package-path bridges/apple/FoundationModelsBridge --filter 'Foundat
 - If a change crosses Python and Swift boundaries, run checks on both sides.
 
 ## Agent Working Norms
-- When behavior or boundaries are unclear, read `docs/architecture/JARVIS.md` before improvising.
 - Prefer the smallest correct change.
 - Preserve existing subsystem vocabulary and tone.
 - Do not edit generated or cache directories such as `.build/`, `.venv/`, `.pytest_cache/`, `.ruff_cache/`, `.coverage`, or `coverage.xml` unless the task is specifically about them.
