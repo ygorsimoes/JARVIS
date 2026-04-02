@@ -31,6 +31,9 @@ async def _run_demo(
         config, enable_native_backends=use_native_backends
     )
     try:
+        if interactive or voice:
+            await runtime.prepare_conversation()
+
         if prompt:
             response = await runtime.respond_text(prompt)
             print(response.full_text)

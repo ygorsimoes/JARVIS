@@ -200,6 +200,16 @@ class CapturingHotPathAdapter:
         return False
 
 
+class PrewarmingAdapter:
+    def __init__(self):
+        self.calls = 0
+        self.kwargs = []
+
+    async def prewarm(self, **kwargs):
+        self.calls += 1
+        self.kwargs.append(dict(kwargs))
+
+
 class FakeMemorySystem:
     def __init__(self, memories=None):
         self.memories = list(memories or [])
@@ -222,7 +232,7 @@ class TestRuntime:
     @pytest_asyncio.fixture(autouse=True)
     async def _runtime(self):
         self.runtime = JarvisRuntime.from_config(
-            JarvisConfig(_env_file=None, allowed_file_roots=["/tmp"]),
+            JarvisConfig(allowed_file_roots=["/tmp"]),
             enable_native_backends=False,
         )
         yield
@@ -756,3 +766,22 @@ class TestRuntime:
         assert route_event.payload["backend"] == "system.get_time"
         assert completed_event.payload["backend"] == "system.get_time"
         assert route_event.payload["route"] == RouteTarget.DIRECT_TOOL.value
+
+    async def test_prepare_conversation_prewarms_conversational_backends_once(self):
+        hot_path = PrewarmingAdapter()
+        deliberative = PrewarmingAdapter()
+        fallback = PrewarmingAdapter()
+        tts = PrewarmingAdapter()
+        self.runtime.hot_path_adapter = hot_path
+        self.runtime.deliberative_adapter = deliberative
+        self.runtime.fallback_adapter = fallback
+        self.runtime.tts_adapter = tts
+
+        await self.runtime.prepare_conversation()
+        await self.runtime.prepare_conversation()
+
+        assert hot_path.calls == 1
+        assert deliberative.calls == 1
+        assert fallback.calls == 1
+        assert tts.calls == 1
+        assert "tools" in hot_path.kwargs[0]

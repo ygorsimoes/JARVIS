@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Callable, Iterable, List, Optional
+from typing import AsyncIterator, Callable, Iterable, List, Mapping, Optional
 
 from .adapters import build_runtime_adapters
 from .adapters.memory.sqlite_vec import SQLiteVecMemoryAdapter
@@ -156,6 +156,8 @@ class JarvisRuntime:
         self._pending_voice_pipeline: SpeechPipeline | None = None
         self._pending_voice_relisten = False
         self._trace_reporter: VoiceTraceReporter | None = None
+        self._conversation_prepare_lock = asyncio.Lock()
+        self._conversation_prepared = False
 
     @classmethod
     def from_config(
@@ -179,6 +181,9 @@ class JarvisRuntime:
             SentenceStreamerConfig(
                 min_dispatch_tokens=config.sentence_min_tokens,
                 min_soft_boundary_chars=config.sentence_min_soft_boundary_chars,
+                clause_fallback_chars=config.sentence_clause_fallback_chars,
+                max_buffer_chars=config.sentence_max_buffer_chars,
+                hard_split_min_tokens=config.sentence_hard_split_min_tokens,
                 max_pending_segments=config.sentence_max_pending_segments,
                 backpressure_poll_interval_s=config.sentence_backpressure_poll_ms
                 / 1000.0,
@@ -194,6 +199,8 @@ class JarvisRuntime:
             silence_timeout_ms=config.turn_silence_timeout_ms,
             partial_commit_min_chars=config.turn_partial_commit_min_chars,
             partial_stability_ms=config.turn_partial_stability_ms,
+            early_partial_commit_ms=config.turn_early_partial_commit_ms,
+            long_partial_commit_ms=config.turn_long_partial_commit_ms,
             tick_interval_ms=config.turn_tick_interval_ms,
             max_turn_duration_s=config.turn_max_duration_s,
         )
@@ -243,6 +250,7 @@ class JarvisRuntime:
         return runtime
 
     async def run_voice_foreground(self, turn_limit: Optional[int] = None) -> None:
+        await self.prepare_conversation()
         await self._ensure_trace_reporter_started()
         handled_turns = 0
         carry_activation = False
@@ -630,6 +638,35 @@ class JarvisRuntime:
             full_text=full_text,
         )
 
+    async def prepare_conversation(self) -> None:
+        if self._conversation_prepared:
+            return
+
+        async with self._conversation_prepare_lock:
+            if self._conversation_prepared:
+                return
+
+            tools = self.action_broker.describe_available_tools()
+            prepared_ids: set[int] = set()
+            tasks: list[asyncio.Task] = []
+            for adapter, kwargs in (
+                (self.hot_path_adapter, {"tools": tools}),
+                (self.deliberative_adapter, {}),
+                (self.fallback_adapter, {}),
+                (self.tts_adapter, {}),
+            ):
+                if id(adapter) in prepared_ids:
+                    continue
+                task = self._build_prewarm_task(adapter, kwargs)
+                if task is None:
+                    continue
+                prepared_ids.add(id(adapter))
+                tasks.append(task)
+
+            if tasks:
+                await asyncio.gather(*tasks)
+            self._conversation_prepared = True
+
     async def shutdown(self) -> None:
         if self._pending_voice_pipeline is not None:
             await self._pending_voice_pipeline.shutdown()
@@ -715,6 +752,9 @@ class JarvisRuntime:
         return SentenceStreamerConfig(
             min_dispatch_tokens=min(config.min_dispatch_tokens, 4),
             min_soft_boundary_chars=min(config.min_soft_boundary_chars, 24),
+            clause_fallback_chars=min(config.clause_fallback_chars, 56),
+            max_buffer_chars=min(config.max_buffer_chars, 120),
+            hard_split_min_tokens=min(config.hard_split_min_tokens, 14),
             max_pending_segments=config.max_pending_segments,
             backpressure_poll_interval_s=config.backpressure_poll_interval_s,
         )
@@ -1358,7 +1398,9 @@ class JarvisRuntime:
             "playback_backend": self.playback_backend_name,
         }
 
-    def _voice_pipeline_event_context(self, turn_id: str) -> dict[str, object]:
+    def _voice_pipeline_event_context(
+        self, turn_id: str
+    ) -> Callable[[], dict[str, object]]:
         def build_context() -> dict[str, object]:
             context: dict[str, object] = {
                 "session_id": self.session_id,
@@ -1505,6 +1547,35 @@ class JarvisRuntime:
         if payload:
             enriched.update(payload)
         return enriched
+
+    def _build_prewarm_task(
+        self, adapter: object, kwargs: Mapping[str, object]
+    ) -> asyncio.Task | None:
+        prewarm = getattr(adapter, "prewarm", None)
+        if prewarm is None:
+            return None
+        return asyncio.create_task(
+            self._safe_prewarm(adapter, kwargs),
+            name="jarvis-conversation-prewarm",
+        )
+
+    async def _safe_prewarm(
+        self, adapter: object, kwargs: Mapping[str, object]
+    ) -> None:
+        prewarm = getattr(adapter, "prewarm", None)
+        if prewarm is None:
+            return
+        try:
+            try:
+                await prewarm(**kwargs)
+            except TypeError:
+                await prewarm()
+        except Exception as exc:
+            logger.warning(
+                "Conversation backend prewarm failed",
+                adapter=adapter.__class__.__name__,
+                error=str(exc),
+            )
 
     @staticmethod
     def _default_capabilities(config: JarvisConfig) -> list:

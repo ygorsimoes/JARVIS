@@ -134,6 +134,9 @@ class MLXLMAdapter:
         self._cancel_event.set()
         await asyncio.sleep(0)
 
+    async def prewarm(self) -> None:
+        await asyncio.to_thread(self._ensure_model_loaded)
+
     def _ensure_model_loaded(self) -> tuple[object, object, Callable[..., Any]]:
         if self._model is not None and self._tokenizer is not None:
             assert self._stream_generate is not None

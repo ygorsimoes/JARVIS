@@ -10,6 +10,9 @@ from typing import AsyncIterator, List, Optional
 class SentenceStreamerConfig:
     min_dispatch_tokens: int = 8
     min_soft_boundary_chars: int = 40
+    clause_fallback_chars: int = 72
+    max_buffer_chars: int = 160
+    hard_split_min_tokens: int = 18
     max_pending_segments: int = 2
     backpressure_poll_interval_s: float = 0.01
 
@@ -17,6 +20,17 @@ class SentenceStreamerConfig:
 class SentenceStreamer:
     HARD_ENDS = (".", "!", "?")
     SOFT_ENDS = (":", "\n")
+    COMMON_ABBREVIATIONS = (
+        "sr.",
+        "sra.",
+        "dr.",
+        "dra.",
+        "prof.",
+        "etc.",
+        "vs.",
+        "ex.",
+    )
+    CLAUSE_BREAKS = (", ", "; ", "\n")
 
     def __init__(self, config: Optional[SentenceStreamerConfig] = None) -> None:
         self.config = config or SentenceStreamerConfig()
@@ -83,7 +97,11 @@ class SentenceStreamer:
                 continue
             token_count = self._token_count(candidate)
             long_enough = token_count >= self.config.min_dispatch_tokens
-            if character in self.HARD_ENDS and long_enough:
+            if (
+                character in self.HARD_ENDS
+                and long_enough
+                and self._is_terminal_boundary(index)
+            ):
                 return index + 1
             if (
                 character in self.SOFT_ENDS
@@ -91,7 +109,56 @@ class SentenceStreamer:
                 and len(candidate) >= self.config.min_soft_boundary_chars
             ):
                 return index + 1
+
+        if len(stripped_buffer) >= self.config.max_buffer_chars:
+            return self._find_clause_fallback_boundary()
         return None
+
+    def _is_terminal_boundary(self, index: int) -> bool:
+        if index < 0 or index >= len(self._buffer):
+            return False
+        character = self._buffer[index]
+        if character != ".":
+            return True
+        if 0 < index < len(self._buffer) - 1:
+            previous = self._buffer[index - 1]
+            following = self._buffer[index + 1]
+            if previous.isdigit() and following.isdigit():
+                return False
+        lowered_prefix = self._buffer[: index + 1].lower().rstrip()
+        return not any(
+            lowered_prefix.endswith(item) for item in self.COMMON_ABBREVIATIONS
+        )
+
+    def _find_clause_fallback_boundary(self) -> Optional[int]:
+        upper_bound = min(len(self._buffer), self.config.max_buffer_chars)
+        for separator in self.CLAUSE_BREAKS:
+            index = self._buffer.rfind(
+                separator,
+                self.config.clause_fallback_chars,
+                upper_bound,
+            )
+            if index == -1:
+                continue
+            boundary = index + len(separator.rstrip())
+            candidate = self._buffer[:boundary].strip()
+            if self._token_count(candidate) >= self.config.min_dispatch_tokens:
+                return boundary
+
+        if self._token_count(self._buffer) < self.config.hard_split_min_tokens:
+            return None
+
+        boundary = self._buffer.rfind(
+            " ",
+            self.config.clause_fallback_chars,
+            upper_bound,
+        )
+        if boundary == -1:
+            return None
+        candidate = self._buffer[:boundary].strip()
+        if self._token_count(candidate) < self.config.min_dispatch_tokens:
+            return None
+        return boundary
 
     @staticmethod
     def _token_count(text: str) -> int:

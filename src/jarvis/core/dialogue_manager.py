@@ -67,9 +67,10 @@ class DialogueManager:
                 content = content[:137].rstrip() + "..."
             scope_suffix = "" if memory.scope == "global" else " %s" % memory.scope
             lines.append(
-                "- [%s %.2f%s] %s"
+                "%s | origem %s | confianca %.2f%s | %s"
                 % (
                     memory.category.value,
+                    memory.source.value,
                     memory.confidence,
                     scope_suffix,
                     content,

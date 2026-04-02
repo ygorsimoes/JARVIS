@@ -112,6 +112,10 @@ class FoundationModelsBridgeAdapter:
         self._stderr_task = None
         self._owns_process = False
 
+    async def prewarm(self, tools: List[dict] | None = None) -> None:
+        await self._ensure_service_running()
+        await self._ensure_session(tools or [])
+
     async def healthcheck(self) -> bool:
         health = await self._service_health()
         if health is not None and health["available"]:

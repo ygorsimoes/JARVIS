@@ -405,8 +405,7 @@ async def test_memory_system_uses_route_specific_recall_policy():
     assert await system.recall("que horas sao", RouteTarget.DIRECT_TOOL) == []
     await system.maybe_persist_turn("foo", "bar")
 
-    assert calls == [
-        ("fts", "me lembra do resumo", 2),
-        ("semantic", "analisa o projeto jarvis", 4),
-        ("persist", "foo", "bar"),
-    ]
+    assert calls[0] == ("fts", "me lembra do resumo", 2)
+    assert ("fts", "analisa o projeto jarvis", 4) in calls
+    assert ("semantic", "analisa o projeto jarvis", 4) in calls
+    assert calls[-1] == ("persist", "foo", "bar")

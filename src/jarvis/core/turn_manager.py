@@ -10,6 +10,8 @@ class TurnManagerConfig:
     silence_timeout_ms: int = 800
     partial_commit_min_chars: int = 16
     partial_stability_ms: int = 250
+    early_partial_commit_ms: int = 280
+    long_partial_commit_ms: int = 420
     tick_interval_ms: int = 100
     max_turn_duration_s: float = 30.0
 
@@ -20,6 +22,14 @@ class TurnManagerConfig:
     @property
     def partial_stability_s(self) -> float:
         return self.partial_stability_ms / 1000.0
+
+    @property
+    def early_partial_commit_s(self) -> float:
+        return self.early_partial_commit_ms / 1000.0
+
+    @property
+    def long_partial_commit_s(self) -> float:
+        return self.long_partial_commit_ms / 1000.0
 
 
 @dataclass
@@ -59,6 +69,7 @@ class TurnManager:
         self.silence_started_at_monotonic: Optional[float] = None
         self.last_event_at_monotonic: Optional[float] = None
         self.last_partial_at_monotonic: Optional[float] = None
+        self.partial_changed_at_monotonic: Optional[float] = None
 
     def consume_event(
         self, event: dict, now: Optional[float] = None
@@ -114,7 +125,9 @@ class TurnManager:
             self.started_at_monotonic = now
         normalized = self._normalized_text(text)
         if normalized:
-            self.partial_text = normalized
+            if normalized != self.partial_text:
+                self.partial_text = normalized
+                self.partial_changed_at_monotonic = now
             self.last_partial_at_monotonic = now
             if not self.speech_active:
                 self.silence_started_at_monotonic = now
@@ -147,6 +160,9 @@ class TurnManager:
             return None
 
         silence_elapsed = now - self.silence_started_at_monotonic
+        early_completed = self._maybe_complete_early_partial(now, silence_elapsed)
+        if early_completed is not None:
+            return early_completed
         if silence_elapsed < self.config.silence_timeout_s:
             return None
 
@@ -207,11 +223,31 @@ class TurnManager:
         return len(stripped.split()) >= 5
 
     def _partial_is_stable(self, now: Optional[float]) -> bool:
-        if self.last_partial_at_monotonic is None:
+        if self.partial_changed_at_monotonic is None:
             return False
         if now is None:
             now = time.monotonic()
-        return now - self.last_partial_at_monotonic >= self.config.partial_stability_s
+        return (
+            now - self.partial_changed_at_monotonic >= self.config.partial_stability_s
+        )
+
+    def _maybe_complete_early_partial(
+        self, now: float, silence_elapsed: float
+    ) -> Optional[CompletedTurn]:
+        if not self._partial_is_committable(now):
+            return None
+
+        stripped = self.partial_text.strip()
+        if stripped.endswith((".", "!", "?")):
+            if silence_elapsed >= self.config.early_partial_commit_s:
+                return self._complete("early_partial_commit", now, used_partial=True)
+            return None
+
+        long_clause = len(stripped) >= 72 and len(stripped.split()) >= 9
+        if long_clause and silence_elapsed >= self.config.long_partial_commit_s:
+            return self._complete("long_partial_commit", now, used_partial=True)
+
+        return None
 
     def _looks_incomplete(self, text: str) -> bool:
         lowered = text.rstrip().lower()

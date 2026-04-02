@@ -41,6 +41,9 @@ class MLXAudioKokoroAdapter:
     async def shutdown(self) -> None:
         await asyncio.sleep(0)
 
+    async def prewarm(self) -> None:
+        await asyncio.to_thread(self._ensure_model)
+
     def _ensure_model(self):
         if self._load_error is not None:
             raise self._load_error

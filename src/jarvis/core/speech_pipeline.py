@@ -192,31 +192,30 @@ class SpeechPipeline:
             self._error = exc
 
     async def _render_sentence_chunks(self, item: QueuedSentence):
-        pending_chunk: bytes | None = None
+        emitted_any_chunk = False
         chunk_index = 0
 
         async for audio_chunk in self.tts_adapter.synthesize_stream(item.text):
             if self._stopped:
                 break
-            if pending_chunk is not None:
-                yield RenderedAudioChunk(
-                    index=item.index,
-                    text=item.text,
-                    audio_bytes=pending_chunk,
-                    is_first_chunk=chunk_index == 0,
-                    is_last_chunk=False,
-                )
-                chunk_index += 1
-            pending_chunk = audio_chunk
+            emitted_any_chunk = True
+            yield RenderedAudioChunk(
+                index=item.index,
+                text=item.text,
+                audio_bytes=audio_chunk,
+                is_first_chunk=chunk_index == 0,
+                is_last_chunk=False,
+            )
+            chunk_index += 1
 
-        if pending_chunk is None or self._stopped:
+        if not emitted_any_chunk or self._stopped:
             return
 
         yield RenderedAudioChunk(
             index=item.index,
             text=item.text,
-            audio_bytes=pending_chunk,
-            is_first_chunk=chunk_index == 0,
+            audio_bytes=b"",
+            is_first_chunk=False,
             is_last_chunk=True,
         )
 

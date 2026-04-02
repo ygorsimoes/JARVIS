@@ -80,3 +80,27 @@ class FallbackTTSAdapter:
             shutdown = getattr(adapter, "shutdown", None)
             if shutdown is not None:
                 await shutdown()
+
+    async def prewarm(self) -> None:
+        primary_prewarm = getattr(self.primary, "prewarm", None)
+        fallback_prewarm = getattr(self.fallback, "prewarm", None)
+
+        if primary_prewarm is not None and not self._fallback_only:
+            try:
+                await primary_prewarm()
+                self._effective_backend_name = self.primary_name
+                self._last_error_message = None
+                return
+            except Exception as exc:
+                self._fallback_only = True
+                self._effective_backend_name = self.fallback_name
+                self._last_error_message = str(exc)
+                logger.warning(
+                    "Primary TTS backend failed during prewarm, falling back",
+                    primary=self.primary_name,
+                    fallback=self.fallback_name,
+                    error=str(exc),
+                )
+
+        if fallback_prewarm is not None:
+            await fallback_prewarm()

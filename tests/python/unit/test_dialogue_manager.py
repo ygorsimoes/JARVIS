@@ -56,6 +56,7 @@ class TestDialogueManager:
         assert messages[1].role == Role.SYSTEM
         assert "Usuario gosta de respostas objetivas" in messages[1].content
         assert "project:jarvis" in messages[1].content
+        assert "origem inferred" in messages[1].content
         assert "nao deve aparecer" not in messages[1].content
         assert messages[2].metadata == {"source": "microphone"}
         assert messages[-1].role == Role.USER

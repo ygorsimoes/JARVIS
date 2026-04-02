@@ -37,3 +37,29 @@ class TestSentenceStreamer:
             "Primeira frase completa. Segunda frase completa."
         )
         assert sentences == ["Primeira frase completa.", "Segunda frase completa."]
+
+    async def test_does_not_split_common_abbreviation(self):
+        streamer = SentenceStreamer(SentenceStreamerConfig(min_dispatch_tokens=2))
+
+        sentences = streamer.push_text("Falei com o dr. Silva ontem. Depois seguimos.")
+
+        assert sentences == ["Falei com o dr. Silva ontem.", "Depois seguimos."]
+
+    async def test_falls_back_to_clause_boundary_for_long_unpunctuated_text(self):
+        streamer = SentenceStreamer(
+            SentenceStreamerConfig(
+                min_dispatch_tokens=4,
+                clause_fallback_chars=40,
+                max_buffer_chars=80,
+                hard_split_min_tokens=10,
+            )
+        )
+
+        sentences = streamer.push_text(
+            "Esta resposta vem longa demais sem ponto final, mas ainda assim precisa sair cedo para a fala continuar fluida"
+        )
+
+        assert sentences == ["Esta resposta vem longa demais sem ponto final,"]
+        assert streamer.flush() == [
+            "mas ainda assim precisa sair cedo para a fala continuar fluida"
+        ]

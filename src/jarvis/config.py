@@ -88,12 +88,17 @@ class JarvisConfig(BaseSettings):
 
     sentence_min_tokens: int = 8
     sentence_min_soft_boundary_chars: int = 40
+    sentence_clause_fallback_chars: int = 72
+    sentence_max_buffer_chars: int = 160
+    sentence_hard_split_min_tokens: int = 18
     sentence_max_pending_segments: int = 2
     sentence_backpressure_poll_ms: int = 10
 
     turn_silence_timeout_ms: int = 800
     turn_partial_commit_min_chars: int = 16
     turn_partial_stability_ms: int = 250
+    turn_early_partial_commit_ms: int = 280
+    turn_long_partial_commit_ms: int = 420
     turn_tick_interval_ms: int = 100
     turn_max_duration_s: float = 30.0
     memory_recall_timeout_ms: int = 50

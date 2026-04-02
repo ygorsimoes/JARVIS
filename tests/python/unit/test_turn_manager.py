@@ -90,3 +90,25 @@ class TestTurnManager:
         assert completed is not None
         assert completed.text == "Olá, tudo bem contigo?"
         assert completed.used_partial
+
+    def test_commits_stable_punctuated_partial_before_full_silence_timeout(self):
+        manager = TurnManager(
+            TurnManagerConfig(
+                silence_timeout_ms=800,
+                partial_commit_min_chars=10,
+                partial_stability_ms=200,
+                early_partial_commit_ms=280,
+            )
+        )
+
+        manager.consume_vad_signal(True, now=0.0)
+        manager.consume_partial_transcript("Isso fecha uma frase.", now=0.05)
+        manager.consume_vad_signal(False, now=0.06)
+
+        assert manager.tick(now=0.20) is None
+
+        completed = manager.tick(now=0.35)
+
+        assert completed is not None
+        assert completed.text == "Isso fecha uma frase."
+        assert completed.reason == "early_partial_commit"
