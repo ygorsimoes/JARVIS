@@ -41,13 +41,12 @@ def prewarm_whisper_model(config: AppConfig) -> None:
 def prewarm_ollama_model(config: AppConfig) -> None:
     payload = {
         "model": config.ollama_model,
-        "messages": [{"role": "user", "content": "Responda apenas com ok."}],
         "stream": False,
         "keep_alive": config.ollama_keep_alive,
     }
 
     request = Request(
-        f"{config.ollama_base_url.removesuffix('/v1')}/api/chat",
+        f"{config.ollama_base_url.removesuffix('/v1')}/api/generate",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )

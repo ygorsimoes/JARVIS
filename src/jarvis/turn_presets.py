@@ -15,24 +15,24 @@ class TurnPreset:
 TURN_PRESETS: dict[str, TurnPreset] = {
     "balanced": TurnPreset(
         name="balanced",
-        user_speech_timeout=0.7,
-        settle_secs=0.25,
-        trailing_secs=0.8,
-        incomplete_secs=2.0,
+        user_speech_timeout=1.0,
+        settle_secs=0.4,
+        trailing_secs=1.4,
+        incomplete_secs=3.2,
     ),
     "patient": TurnPreset(
         name="patient",
-        user_speech_timeout=1.0,
-        settle_secs=0.35,
-        trailing_secs=1.2,
-        incomplete_secs=3.0,
+        user_speech_timeout=1.3,
+        settle_secs=0.55,
+        trailing_secs=1.8,
+        incomplete_secs=4.2,
     ),
     "very-patient": TurnPreset(
         name="very-patient",
-        user_speech_timeout=1.4,
-        settle_secs=0.5,
-        trailing_secs=1.8,
-        incomplete_secs=4.5,
+        user_speech_timeout=1.8,
+        settle_secs=0.8,
+        trailing_secs=2.3,
+        incomplete_secs=5.8,
     ),
 }
 

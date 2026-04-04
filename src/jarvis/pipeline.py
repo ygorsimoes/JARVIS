@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from loguru import logger
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
@@ -12,6 +13,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
+    LLMAssistantAggregatorParams,
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
     UserTurnStoppedMessage,
@@ -23,8 +25,12 @@ from pipecat.services.whisper.stt import WhisperSTTServiceMLX
 from pipecat.transcriptions.language import Language
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.turns.user_start import VADUserTurnStartStrategy
-from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.utils.context.llm_context_summarization import (
+    LLMAutoContextSummarizationConfig,
+    LLMContextSummaryConfig,
+)
 from pipecat.utils.sync.event_notifier import EventNotifier
 
 from .audio_gate import LocalAudioEchoGate
@@ -34,6 +40,7 @@ from .ollama import (
     build_ollama_extra,
     is_qwen35_model,
     resolve_ollama_model,
+    select_smaller_qwen_model,
     uses_reasoning_effort_none,
 )
 from .prompt import SYSTEM_PROMPT
@@ -97,16 +104,15 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=vad_analyzer,
-            user_turn_stop_timeout=max(config.context_incomplete_secs + 1.0, 8.0),
+            user_turn_stop_timeout=max(
+                config.user_speech_timeout, config.context_incomplete_secs + 1.0
+            ),
             user_turn_strategies=UserTurnStrategies(
                 start=[VADUserTurnStartStrategy(enable_interruptions=interruptions_enabled)],
-                stop=[
-                    SpeechTimeoutUserTurnStopStrategy(
-                        user_speech_timeout=config.user_speech_timeout
-                    )
-                ],
+                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())],
             ),
         ),
+        assistant_params=_build_assistant_params(config),
     )
 
     processors = [transport.input()]
@@ -155,9 +161,11 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
     )
     if uses_reasoning_effort_none(config.ollama_model):
         logger.info("[ollama] forcing reasoning.effort=none para reduzir latencia")
+    if config.context_summarization_enabled:
+        logger.info("[context] sumarizacao automatica ativada")
     logger.info(
-        "[turn] preset={} | user_speech_timeout={:.1f}s | settle={:.1f}s | "
-        "trailing={:.1f}s | incomplete={:.1f}s",
+        "[turn] preset={} | fallback_timeout={:.1f}s | settle={:.1f}s | "
+        "trailing={:.1f}s | incomplete={:.1f}s | strategy=smart-turn",
         config.turn_preset,
         config.user_speech_timeout,
         config.context_settle_secs,
@@ -241,7 +249,40 @@ def _build_ollama_llm(config: AppConfig) -> OLLamaLLMService:
             temperature=config.ollama_temperature,
             max_tokens=config.ollama_max_tokens,
             system_instruction=SYSTEM_PROMPT,
-            extra=build_ollama_extra(config.ollama_model),
+            extra=build_ollama_extra(config.ollama_model, keep_alive=config.ollama_keep_alive),
+        ),
+    )
+
+
+def _build_assistant_params(config: AppConfig) -> LLMAssistantAggregatorParams:
+    params = LLMAssistantAggregatorParams()
+    if not config.context_summarization_enabled:
+        return params
+
+    summary_llm = _build_summary_llm(config)
+    params.enable_auto_context_summarization = True
+    params.auto_context_summarization_config = LLMAutoContextSummarizationConfig(
+        max_context_tokens=config.context_summary_max_context_tokens,
+        max_unsummarized_messages=config.context_summary_max_unsummarized_messages,
+        summary_config=LLMContextSummaryConfig(
+            target_context_tokens=config.context_summary_target_context_tokens,
+            min_messages_after_summary=config.context_summary_min_messages_after_summary,
+            summary_message_template="Resumo da conversa: {summary}",
+            llm=summary_llm,
+        ),
+    )
+    return params
+
+
+def _build_summary_llm(config: AppConfig) -> OLLamaLLMService:
+    summary_model = select_smaller_qwen_model(config.ollama_model, config.ollama_fallback_model)
+    return OLLamaLLMService(
+        base_url=config.ollama_base_url,
+        settings=OLLamaLLMService.Settings(
+            model=summary_model,
+            temperature=0.0,
+            max_tokens=config.context_summary_target_context_tokens,
+            extra=build_ollama_extra(summary_model, keep_alive=config.ollama_keep_alive),
         ),
     )
 
@@ -326,6 +367,15 @@ def _attach_transcript_logging(
     ) -> None:
         if message.content:
             logger.info("[llm] assistente> {}", message.content)
+
+    @assistant_aggregator.event_handler("on_summary_applied")
+    async def on_summary_applied(aggregator, summarizer, event) -> None:
+        logger.info(
+            "[context] resumo aplicado | mensagens={} -> {} | comprimidas={}",
+            event.original_message_count,
+            event.new_message_count,
+            event.summarized_message_count,
+        )
 
 
 def _to_ms(seconds: float) -> float:

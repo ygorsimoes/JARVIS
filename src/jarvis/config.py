@@ -9,14 +9,14 @@ from dotenv import load_dotenv
 from .turn_presets import get_turn_preset
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
-DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
-DEFAULT_OLLAMA_FALLBACK_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_FALLBACK_MODEL = "qwen3.5:2b"
 DEFAULT_KOKORO_VOICE = "pm_alex"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 DEFAULT_OLLAMA_TEMPERATURE = 0.1
-DEFAULT_TURN_PRESET = "balanced"
+DEFAULT_TURN_PRESET = "patient"
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,16 +41,21 @@ class AppConfig:
     kokoro_model_path: Path | None = None
     kokoro_voices_path: Path | None = None
     prewarm_enabled: bool = True
-    ollama_prewarm_enabled: bool = False
+    ollama_prewarm_enabled: bool = True
     echo_suppression_enabled: bool = True
     echo_suppression_release_ms: int = 350
     turn_preset: str = DEFAULT_TURN_PRESET
     vad_start_secs: float = 0.2
     vad_stop_secs: float = 0.2
-    user_speech_timeout: float = 0.7
-    context_settle_secs: float = 0.25
-    context_trailing_secs: float = 0.8
-    context_incomplete_secs: float = 2.0
+    user_speech_timeout: float = 1.3
+    context_settle_secs: float = 0.55
+    context_trailing_secs: float = 1.8
+    context_incomplete_secs: float = 4.2
+    context_summarization_enabled: bool = True
+    context_summary_max_context_tokens: int = 2400
+    context_summary_max_unsummarized_messages: int = 8
+    context_summary_target_context_tokens: int = 800
+    context_summary_min_messages_after_summary: int = 4
 
 
 def load_config(env_file: str | None = None) -> AppConfig:
@@ -89,7 +94,7 @@ def load_config(env_file: str | None = None) -> AppConfig:
         kokoro_model_path=_optional_path_env("JARVIS_KOKORO_MODEL_PATH"),
         kokoro_voices_path=_optional_path_env("JARVIS_KOKORO_VOICES_PATH"),
         prewarm_enabled=_bool_env("JARVIS_PREWARM_ENABLED", True),
-        ollama_prewarm_enabled=_bool_env("JARVIS_OLLAMA_PREWARM_ENABLED", False),
+        ollama_prewarm_enabled=_bool_env("JARVIS_OLLAMA_PREWARM_ENABLED", True),
         echo_suppression_enabled=_bool_env("JARVIS_ECHO_SUPPRESSION_ENABLED", True),
         echo_suppression_release_ms=_int_env("JARVIS_ECHO_SUPPRESSION_RELEASE_MS", 350),
         turn_preset=turn_preset,
@@ -101,6 +106,23 @@ def load_config(env_file: str | None = None) -> AppConfig:
         context_incomplete_secs=_float_env(
             "JARVIS_CONTEXT_INCOMPLETE_SECS",
             preset.incomplete_secs,
+        ),
+        context_summarization_enabled=_bool_env("JARVIS_CONTEXT_SUMMARIZATION_ENABLED", True),
+        context_summary_max_context_tokens=_int_env(
+            "JARVIS_CONTEXT_SUMMARY_MAX_CONTEXT_TOKENS",
+            2400,
+        ),
+        context_summary_max_unsummarized_messages=_int_env(
+            "JARVIS_CONTEXT_SUMMARY_MAX_UNSUMMARIZED_MESSAGES",
+            8,
+        ),
+        context_summary_target_context_tokens=_int_env(
+            "JARVIS_CONTEXT_SUMMARY_TARGET_TOKENS",
+            800,
+        ),
+        context_summary_min_messages_after_summary=_int_env(
+            "JARVIS_CONTEXT_SUMMARY_MIN_MESSAGES_AFTER_SUMMARY",
+            4,
         ),
     )
 

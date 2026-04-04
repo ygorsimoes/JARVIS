@@ -136,7 +136,7 @@ def _looks_incomplete(text: str) -> bool:
         return False
     if _ends_terminal_sentence(text):
         return False
-    if text.endswith(("...", "…")):
+    if "..." in text or "…" in text:
         return True
     if len(text) < 28 and not text.endswith(("?", "!", ".")):
         return True
@@ -152,8 +152,13 @@ def _looks_incomplete(text: str) -> bool:
         "sobre",
         "que é",
         "que eu",
+        "mas",
+        "seria",
+        "estou",
     )
     if any(text.endswith(ending) for ending in incomplete_endings):
+        return True
+    if any(fragment in text for fragment in (" mas ", " e eu ", " queria ", " gostaria ")):
         return True
     return False
 
@@ -163,6 +168,8 @@ def _looks_trailing(text: str) -> bool:
         return False
     if _ends_terminal_sentence(text):
         return False
+    if len(text) >= 50:
+        return True
     if text.endswith((",", ":", ";")):
         return True
     trailing_words = {
