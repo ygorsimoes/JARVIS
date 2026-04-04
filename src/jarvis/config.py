@@ -7,11 +7,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
-DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_FALLBACK_MODEL = "qwen3:4b"
-DEFAULT_KOKORO_VOICE = "af_heart"
+DEFAULT_KOKORO_VOICE = "pm_alex"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
+DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,9 +30,15 @@ class AppConfig:
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     ollama_fallback_model: str = DEFAULT_OLLAMA_FALLBACK_MODEL
     ollama_temperature: float = 0.35
+    ollama_max_tokens: int = 96
+    ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
     kokoro_voice: str = DEFAULT_KOKORO_VOICE
     kokoro_model_path: Path | None = None
     kokoro_voices_path: Path | None = None
+    prewarm_enabled: bool = True
+    ollama_prewarm_enabled: bool = False
+    echo_suppression_enabled: bool = True
+    echo_suppression_release_ms: int = 350
 
 
 def load_config(env_file: str | None = None) -> AppConfig:
@@ -60,9 +67,15 @@ def load_config(env_file: str | None = None) -> AppConfig:
             DEFAULT_OLLAMA_FALLBACK_MODEL,
         ),
         ollama_temperature=_float_env("JARVIS_OLLAMA_TEMPERATURE", 0.35),
+        ollama_max_tokens=_int_env("JARVIS_OLLAMA_MAX_TOKENS", 96),
+        ollama_keep_alive=os.getenv("JARVIS_OLLAMA_KEEP_ALIVE", DEFAULT_OLLAMA_KEEP_ALIVE),
         kokoro_voice=os.getenv("JARVIS_KOKORO_VOICE", DEFAULT_KOKORO_VOICE),
         kokoro_model_path=_optional_path_env("JARVIS_KOKORO_MODEL_PATH"),
         kokoro_voices_path=_optional_path_env("JARVIS_KOKORO_VOICES_PATH"),
+        prewarm_enabled=_bool_env("JARVIS_PREWARM_ENABLED", True),
+        ollama_prewarm_enabled=_bool_env("JARVIS_OLLAMA_PREWARM_ENABLED", False),
+        echo_suppression_enabled=_bool_env("JARVIS_ECHO_SUPPRESSION_ENABLED", True),
+        echo_suppression_release_ms=_int_env("JARVIS_ECHO_SUPPRESSION_RELEASE_MS", 350),
     )
 
 
@@ -84,3 +97,17 @@ def _optional_int_env(name: str) -> int | None:
 def _optional_path_env(name: str) -> Path | None:
     raw = os.getenv(name)
     return Path(raw).expanduser() if raw else None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    return default

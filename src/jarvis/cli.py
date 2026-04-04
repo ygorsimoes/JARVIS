@@ -79,7 +79,8 @@ def _configure_logging(level: str) -> None:
         sys.stderr,
         level=level,
         format=(
-            "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
+            "<green>{time:HH:mm:ss.SSS}</green> | "
+            "<level>{level: <8}</level> | <level>{message}</level>"
         ),
     )
 
@@ -122,7 +123,9 @@ def _run_devices() -> int:
 async def _run_transcribe(config: AppConfig) -> int:
     from pipecat.pipeline.runner import PipelineRunner
 
-    from .pipeline import build_transcribe_task
+    from .pipeline import build_transcribe_task, prepare_stt_config
+
+    config = prepare_stt_config(config)
 
     logger.info(
         "[transcribe] ouvindo microfone | whisper={} | input_device={}",
@@ -140,13 +143,14 @@ async def _run_transcribe(config: AppConfig) -> int:
 async def _run_chat(config: AppConfig) -> int:
     from pipecat.pipeline.runner import PipelineRunner
 
-    from .pipeline import build_chat_task
+    from .pipeline import build_chat_task, prepare_chat_config
 
     logger.info(
         "[chat] iniciando sessao local | input_device={} | output_device={}",
         _device_label(config.input_device_index),
         _device_label(config.output_device_index),
     )
+    config = prepare_chat_config(config)
     logger.info("[chat] aguardando fala do usuario | pressione Ctrl+C para encerrar")
 
     task = build_chat_task(config)
