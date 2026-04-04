@@ -1,0 +1,30 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Assistente conversacional local em pt-BR com voz em tempo real"
+requires-python = ">=3.12"
+dependencies = [
+    "loguru>=0.7.3",
+    "pipecat-ai[kokoro,local,mlx-whisper,whisper]>=0.0.108",
+    "python-dotenv>=1.2.2",
+    "websockets>=15.0.1",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
