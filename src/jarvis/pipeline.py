@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 from loguru import logger
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
@@ -12,8 +11,10 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
+    AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
+    UserTurnStoppedMessage,
 )
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.kokoro.tts import KokoroTTSService
@@ -22,9 +23,9 @@ from pipecat.services.whisper.stt import WhisperSTTServiceMLX
 from pipecat.transcriptions.language import Language
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.turns.user_start import VADUserTurnStartStrategy
-from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
-from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.utils.sync.event_notifier import EventNotifier
 
 from .audio_gate import LocalAudioEchoGate
 from .config import AppConfig
@@ -35,11 +36,11 @@ from .ollama import (
     resolve_ollama_model,
     uses_reasoning_effort_none,
 )
-from .prompt import (
-    INCOMPLETE_LONG_PROMPT_PT_BR,
-    INCOMPLETE_SHORT_PROMPT_PT_BR,
-    SYSTEM_PROMPT,
-    TURN_COMPLETION_INSTRUCTIONS_PT_BR,
+from .prompt import SYSTEM_PROMPT
+from .turn_gate import (
+    SafeGatedLLMContextAggregator,
+    TrailingUserMessagesNormalizer,
+    TurnGateController,
 )
 from .warmup import prepare_stt_config, prewarm_ollama_model, prewarm_whisper_model
 
@@ -70,6 +71,14 @@ def build_transcribe_task(config: AppConfig) -> PipelineTask:
 
 def build_chat_task(config: AppConfig) -> PipelineTask:
     latency_observer = UserBotLatencyObserver()
+    context_notifier = EventNotifier()
+    gated_context = SafeGatedLLMContextAggregator(notifier=context_notifier)
+    turn_gate = TurnGateController(
+        notifier=context_notifier,
+        settle_delay_secs=config.context_settle_secs,
+        trailing_delay_secs=config.context_trailing_secs,
+        incomplete_delay_secs=config.context_incomplete_secs,
+    )
 
     transport = _build_local_audio_transport(config, audio_in=True, audio_out=True)
     vad_analyzer = _build_vad_analyzer(config)
@@ -88,11 +97,14 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=vad_analyzer,
-            filter_incomplete_user_turns=config.filter_incomplete_user_turns,
-            user_turn_completion_config=_build_turn_completion_config(config),
+            user_turn_stop_timeout=max(config.context_incomplete_secs + 1.0, 8.0),
             user_turn_strategies=UserTurnStrategies(
                 start=[VADUserTurnStartStrategy(enable_interruptions=interruptions_enabled)],
-                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())],
+                stop=[
+                    SpeechTimeoutUserTurnStopStrategy(
+                        user_speech_timeout=config.user_speech_timeout
+                    )
+                ],
             ),
         ),
     )
@@ -100,7 +112,18 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
     processors = [transport.input()]
     if gate is not None:
         processors.append(gate)
-    processors.extend([stt, user_aggregator, llm, tts, transport.output(), assistant_aggregator])
+    processors.extend(
+        [
+            stt,
+            user_aggregator,
+            TrailingUserMessagesNormalizer(),
+            gated_context,
+            llm,
+            tts,
+            transport.output(),
+            assistant_aggregator,
+        ]
+    )
 
     pipeline = Pipeline(processors)
 
@@ -123,7 +146,7 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
 
     _attach_task_logging(task, mode="chat")
     _attach_turn_logging(task, latency_observer)
-    _attach_transcript_logging(user_aggregator, assistant_aggregator)
+    _attach_transcript_logging(user_aggregator, assistant_aggregator, turn_gate)
     logger.info(
         "[chat] modelo ativo: {} | fallback: {} | voz: {}",
         config.ollama_model,
@@ -132,8 +155,15 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
     )
     if uses_reasoning_effort_none(config.ollama_model):
         logger.info("[ollama] forcing reasoning.effort=none para reduzir latencia")
-    if config.filter_incomplete_user_turns:
-        logger.info("[turn] filtro de fala incompleta ativado")
+    logger.info(
+        "[turn] preset={} | user_speech_timeout={:.1f}s | settle={:.1f}s | "
+        "trailing={:.1f}s | incomplete={:.1f}s",
+        config.turn_preset,
+        config.user_speech_timeout,
+        config.context_settle_secs,
+        config.context_trailing_secs,
+        config.context_incomplete_secs,
+    )
     if config.echo_suppression_enabled:
         logger.warning(
             "[audio] supressao de eco local ativa; interrupcao por voz "
@@ -270,27 +300,33 @@ def _attach_turn_logging(task: PipelineTask, latency_observer: UserBotLatencyObs
         logger.info("[latency] usuario->assistente {:.1f}ms", _to_ms(latency_seconds))
 
 
-def _attach_transcript_logging(user_aggregator, assistant_aggregator) -> None:
+def _attach_transcript_logging(
+    user_aggregator,
+    assistant_aggregator,
+    turn_gate: TurnGateController,
+) -> None:
+    @user_aggregator.event_handler("on_user_turn_started")
+    async def on_user_turn_started(aggregator, strategy) -> None:
+        await turn_gate.cancel_pending()
+
     @user_aggregator.event_handler("on_user_turn_stopped")
-    async def on_user_turn_stopped(aggregator, strategy, message):
+    async def on_user_turn_stopped(
+        aggregator,
+        strategy,
+        message: UserTurnStoppedMessage,
+    ) -> None:
         if message.content:
             logger.info("[user] turno final> {}", message.content)
+            await turn_gate.schedule_release(message.content, owner=aggregator)
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
-    async def on_assistant_turn_stopped(aggregator, message):
+    async def on_assistant_turn_stopped(
+        aggregator,
+        message: AssistantTurnStoppedMessage,
+    ) -> None:
         if message.content:
             logger.info("[llm] assistente> {}", message.content)
 
 
 def _to_ms(seconds: float) -> float:
     return seconds * 1000.0
-
-
-def _build_turn_completion_config(config: AppConfig) -> UserTurnCompletionConfig:
-    return UserTurnCompletionConfig(
-        instructions=TURN_COMPLETION_INSTRUCTIONS_PT_BR,
-        incomplete_short_timeout=config.incomplete_short_timeout,
-        incomplete_long_timeout=config.incomplete_long_timeout,
-        incomplete_short_prompt=INCOMPLETE_SHORT_PROMPT_PT_BR,
-        incomplete_long_prompt=INCOMPLETE_LONG_PROMPT_PT_BR,
-    )
