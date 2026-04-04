@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 from loguru import logger
@@ -46,15 +45,12 @@ class TurnGateController:
         self,
         *,
         notifier: EventNotifier,
-        settle_delay_secs: float,
-        trailing_delay_secs: float,
-        incomplete_delay_secs: float,
+        delay_secs: float,
     ) -> None:
         self._notifier = notifier
-        self._settle_delay_secs = settle_delay_secs
-        self._trailing_delay_secs = trailing_delay_secs
-        self._incomplete_delay_secs = incomplete_delay_secs
+        self._delay_secs = delay_secs
         self._pending_task: asyncio.Task | None = None
+        self._context_released = False
 
     async def cancel_pending(self) -> None:
         if self._pending_task:
@@ -65,44 +61,29 @@ class TurnGateController:
                 pass
             self._pending_task = None
 
-    async def schedule_release(self, text: str, *, owner: FrameProcessor) -> None:
+    async def schedule_release(self, *, owner: FrameProcessor) -> None:
         await self.cancel_pending()
-        delay_secs, reason = compute_turn_gate_delay(
-            text,
-            settle_delay_secs=self._settle_delay_secs,
-            trailing_delay_secs=self._trailing_delay_secs,
-            incomplete_delay_secs=self._incomplete_delay_secs,
-        )
-        logger.debug("[turngate] liberando contexto em {:.2f}s ({})", delay_secs, reason)
-        self._pending_task = owner.create_task(self._notify_after_delay(delay_secs))
+        logger.debug("[turngate] liberando contexto em {:.2f}s (debounce)", self._delay_secs)
+        self._pending_task = owner.create_task(self._notify_after_delay())
 
-    async def _notify_after_delay(self, delay_secs: float) -> None:
+    def should_interrupt_on_resume(self) -> bool:
+        return self._context_released
+
+    def mark_assistant_started(self) -> None:
+        self._context_released = False
+
+    def reset(self) -> None:
+        self._context_released = False
+
+    async def _notify_after_delay(self) -> None:
         try:
-            await asyncio.sleep(delay_secs)
+            await asyncio.sleep(self._delay_secs)
+            self._context_released = True
             await self._notifier.notify()
         except asyncio.CancelledError:
             raise
         finally:
             self._pending_task = None
-
-
-def compute_turn_gate_delay(
-    text: str,
-    *,
-    settle_delay_secs: float,
-    trailing_delay_secs: float,
-    incomplete_delay_secs: float,
-) -> tuple[float, str]:
-    normalized = _normalize_text(text)
-    if not normalized:
-        return settle_delay_secs, "empty"
-    if _ends_terminal_sentence(normalized):
-        return min(settle_delay_secs, 0.35), "terminal"
-    if _looks_incomplete(normalized):
-        return incomplete_delay_secs, "incomplete"
-    if _looks_trailing(normalized):
-        return trailing_delay_secs, "trailing"
-    return settle_delay_secs, "complete"
 
 
 def _merge_trailing_user_messages(messages: list[Any]) -> None:
@@ -125,67 +106,3 @@ def _merge_trailing_user_messages(messages: list[Any]) -> None:
     trailing_messages.reverse()
     merged_content = " ".join(message["content"].strip() for message in trailing_messages)
     messages[trailing_start_index:] = [{"role": "user", "content": merged_content}]
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
-
-
-def _looks_incomplete(text: str) -> bool:
-    if not text:
-        return False
-    if _ends_terminal_sentence(text):
-        return False
-    if "..." in text or "…" in text:
-        return True
-    if len(text) < 28 and not text.endswith(("?", "!", ".")):
-        return True
-    incomplete_endings = (
-        "eu queria",
-        "eu gostaria",
-        "eu queria saber",
-        "eu gostaria de",
-        "talvez",
-        "bom",
-        "entao",
-        "então",
-        "sobre",
-        "que é",
-        "que eu",
-        "mas",
-        "seria",
-        "estou",
-    )
-    if any(text.endswith(ending) for ending in incomplete_endings):
-        return True
-    if any(fragment in text for fragment in (" mas ", " e eu ", " queria ", " gostaria ")):
-        return True
-    return False
-
-
-def _looks_trailing(text: str) -> bool:
-    if not text:
-        return False
-    if _ends_terminal_sentence(text):
-        return False
-    if len(text) >= 50:
-        return True
-    if text.endswith((",", ":", ";")):
-        return True
-    trailing_words = {
-        "e",
-        "mas",
-        "porque",
-        "que",
-        "sobre",
-        "para",
-        "com",
-        "de",
-        "do",
-        "da",
-    }
-    return text.rsplit(" ", 1)[-1] in trailing_words
-
-
-def _ends_terminal_sentence(text: str) -> bool:
-    return text.endswith(("?", "!", "."))

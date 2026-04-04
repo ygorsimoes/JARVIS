@@ -17,6 +17,8 @@ DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 DEFAULT_OLLAMA_TEMPERATURE = 0.1
 DEFAULT_TURN_PRESET = "patient"
+DEFAULT_SMART_TURN_STOP_SECS = 6.0
+DEFAULT_TURN_RESUME_DELAY_SECS = 2.5
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,12 +47,14 @@ class AppConfig:
     echo_suppression_enabled: bool = True
     echo_suppression_release_ms: int = 350
     turn_preset: str = DEFAULT_TURN_PRESET
+    smart_turn_stop_secs: float = DEFAULT_SMART_TURN_STOP_SECS
+    turn_resume_delay_secs: float = DEFAULT_TURN_RESUME_DELAY_SECS
     vad_start_secs: float = 0.2
     vad_stop_secs: float = 0.2
     user_speech_timeout: float = 1.3
-    context_settle_secs: float = 0.55
-    context_trailing_secs: float = 1.8
-    context_incomplete_secs: float = 4.2
+    context_settle_secs: float = 0.35
+    context_trailing_secs: float = 6.0
+    context_incomplete_secs: float = 12.0
     context_summarization_enabled: bool = True
     context_summary_max_context_tokens: int = 2400
     context_summary_max_unsummarized_messages: int = 8
@@ -98,6 +102,12 @@ def load_config(env_file: str | None = None) -> AppConfig:
         echo_suppression_enabled=_bool_env("JARVIS_ECHO_SUPPRESSION_ENABLED", True),
         echo_suppression_release_ms=_int_env("JARVIS_ECHO_SUPPRESSION_RELEASE_MS", 350),
         turn_preset=turn_preset,
+        smart_turn_stop_secs=_float_env(
+            "JARVIS_SMART_TURN_STOP_SECS", DEFAULT_SMART_TURN_STOP_SECS
+        ),
+        turn_resume_delay_secs=_float_env(
+            "JARVIS_TURN_RESUME_DELAY_SECS", preset.resume_delay_secs
+        ),
         vad_start_secs=_float_env("JARVIS_VAD_START_SECS", 0.2),
         vad_stop_secs=_float_env("JARVIS_VAD_STOP_SECS", 0.2),
         user_speech_timeout=_float_env("JARVIS_USER_SPEECH_TIMEOUT", preset.user_speech_timeout),

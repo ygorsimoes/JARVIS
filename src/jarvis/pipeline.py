@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from loguru import logger
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -25,7 +26,7 @@ from pipecat.services.whisper.stt import WhisperSTTServiceMLX
 from pipecat.transcriptions.language import Language
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.turns.user_start import VADUserTurnStartStrategy
-from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
@@ -43,12 +44,18 @@ from .ollama import (
     select_smaller_qwen_model,
     uses_reasoning_effort_none,
 )
-from .prompt import SYSTEM_PROMPT
+from .prompt import (
+    SYSTEM_PROMPT,
+    TURN_COMPLETION_INSTRUCTIONS,
+    TURN_COMPLETION_LONG_PROMPT,
+    TURN_COMPLETION_SHORT_PROMPT,
+)
 from .turn_gate import (
     SafeGatedLLMContextAggregator,
     TrailingUserMessagesNormalizer,
     TurnGateController,
 )
+from .turn_stop import ConservativeTurnAnalyzerUserTurnStopStrategy
 from .warmup import prepare_stt_config, prewarm_ollama_model, prewarm_whisper_model
 
 
@@ -82,9 +89,7 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
     gated_context = SafeGatedLLMContextAggregator(notifier=context_notifier)
     turn_gate = TurnGateController(
         notifier=context_notifier,
-        settle_delay_secs=config.context_settle_secs,
-        trailing_delay_secs=config.context_trailing_secs,
-        incomplete_delay_secs=config.context_incomplete_secs,
+        delay_secs=config.context_settle_secs,
     )
 
     transport = _build_local_audio_transport(config, audio_in=True, audio_out=True)
@@ -104,12 +109,19 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=vad_analyzer,
-            user_turn_stop_timeout=max(
-                config.user_speech_timeout, config.context_incomplete_secs + 1.0
-            ),
+            user_turn_stop_timeout=_build_user_turn_stop_timeout(config),
+            filter_incomplete_user_turns=True,
+            user_turn_completion_config=_build_user_turn_completion_config(config),
             user_turn_strategies=UserTurnStrategies(
                 start=[VADUserTurnStartStrategy(enable_interruptions=interruptions_enabled)],
-                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())],
+                stop=[
+                    ConservativeTurnAnalyzerUserTurnStopStrategy(
+                        turn_analyzer=LocalSmartTurnAnalyzerV3(
+                            params=SmartTurnParams(stop_secs=config.smart_turn_stop_secs)
+                        ),
+                        resume_delay_secs=config.turn_resume_delay_secs,
+                    )
+                ],
             ),
         ),
         assistant_params=_build_assistant_params(config),
@@ -164,14 +176,18 @@ def build_chat_task(config: AppConfig) -> PipelineTask:
     if config.context_summarization_enabled:
         logger.info("[context] sumarizacao automatica ativada")
     logger.info(
-        "[turn] preset={} | fallback_timeout={:.1f}s | settle={:.1f}s | "
-        "trailing={:.1f}s | incomplete={:.1f}s | strategy=smart-turn",
+        "[turn] preset={} | retomada={:.1f}s | debounce={:.1f}s | "
+        "incomplete_curta={:.1f}s | incomplete_longa={:.1f}s | "
+        "smart_turn_stop={:.1f}s | stop_timeout={:.1f}s",
         config.turn_preset,
-        config.user_speech_timeout,
+        config.turn_resume_delay_secs,
         config.context_settle_secs,
         config.context_trailing_secs,
         config.context_incomplete_secs,
+        config.smart_turn_stop_secs,
+        _build_user_turn_stop_timeout(config),
     )
+    logger.info("[turn] filtro nativo de turno incompleto ativado")
     if config.echo_suppression_enabled:
         logger.warning(
             "[audio] supressao de eco local ativa; interrupcao por voz "
@@ -226,6 +242,24 @@ def _build_vad_analyzer(config: AppConfig) -> SileroVADAnalyzer:
             start_secs=config.vad_start_secs,
             stop_secs=config.vad_stop_secs,
         )
+    )
+
+
+def _build_user_turn_completion_config(config: AppConfig) -> UserTurnCompletionConfig:
+    return UserTurnCompletionConfig(
+        instructions=TURN_COMPLETION_INSTRUCTIONS,
+        incomplete_short_timeout=config.context_trailing_secs,
+        incomplete_long_timeout=config.context_incomplete_secs,
+        incomplete_short_prompt=TURN_COMPLETION_SHORT_PROMPT,
+        incomplete_long_prompt=TURN_COMPLETION_LONG_PROMPT,
+    )
+
+
+def _build_user_turn_stop_timeout(config: AppConfig) -> float:
+    return max(
+        config.user_speech_timeout,
+        config.smart_turn_stop_secs + 2.0,
+        config.context_incomplete_secs + 2.0,
     )
 
 
@@ -348,7 +382,16 @@ def _attach_transcript_logging(
 ) -> None:
     @user_aggregator.event_handler("on_user_turn_started")
     async def on_user_turn_started(aggregator, strategy) -> None:
+        should_interrupt = turn_gate.should_interrupt_on_resume()
         await turn_gate.cancel_pending()
+        if should_interrupt:
+            turn_gate.reset()
+            logger.info("[turn] usuario retomou a fala; cancelando resposta em andamento")
+            await aggregator.broadcast_interruption()
+
+    @assistant_aggregator.event_handler("on_assistant_turn_started")
+    async def on_assistant_turn_started(aggregator) -> None:
+        turn_gate.mark_assistant_started()
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(
@@ -358,7 +401,7 @@ def _attach_transcript_logging(
     ) -> None:
         if message.content:
             logger.info("[user] turno final> {}", message.content)
-            await turn_gate.schedule_release(message.content, owner=aggregator)
+            await turn_gate.schedule_release(owner=aggregator)
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(
