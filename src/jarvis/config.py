@@ -8,11 +8,12 @@ from dotenv import load_dotenv
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
-DEFAULT_OLLAMA_FALLBACK_MODEL = "qwen3:4b"
+DEFAULT_OLLAMA_FALLBACK_MODEL = "qwen3.5:2b"
 DEFAULT_KOKORO_VOICE = "pm_alex"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+DEFAULT_OLLAMA_TEMPERATURE = 0.1
 
 
 @dataclass(slots=True, frozen=True)
@@ -26,10 +27,11 @@ class AppConfig:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     whisper_temperature: float = 0.0
     whisper_no_speech_prob: float = 0.6
+    whisper_ttfs_p99_latency: float = 1.0
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     ollama_fallback_model: str = DEFAULT_OLLAMA_FALLBACK_MODEL
-    ollama_temperature: float = 0.35
+    ollama_temperature: float = DEFAULT_OLLAMA_TEMPERATURE
     ollama_max_tokens: int = 96
     ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
     kokoro_voice: str = DEFAULT_KOKORO_VOICE
@@ -39,6 +41,11 @@ class AppConfig:
     ollama_prewarm_enabled: bool = False
     echo_suppression_enabled: bool = True
     echo_suppression_release_ms: int = 350
+    vad_start_secs: float = 0.2
+    vad_stop_secs: float = 0.2
+    filter_incomplete_user_turns: bool = True
+    incomplete_short_timeout: float = 6.0
+    incomplete_long_timeout: float = 12.0
 
 
 def load_config(env_file: str | None = None) -> AppConfig:
@@ -60,13 +67,14 @@ def load_config(env_file: str | None = None) -> AppConfig:
         ),
         whisper_temperature=_float_env("JARVIS_WHISPER_TEMPERATURE", 0.0),
         whisper_no_speech_prob=_float_env("JARVIS_WHISPER_NO_SPEECH_PROB", 0.6),
+        whisper_ttfs_p99_latency=_float_env("JARVIS_WHISPER_TTFS_P99_LATENCY", 1.0),
         ollama_base_url=os.getenv("JARVIS_OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
         ollama_model=os.getenv("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
         ollama_fallback_model=os.getenv(
             "JARVIS_OLLAMA_FALLBACK_MODEL",
             DEFAULT_OLLAMA_FALLBACK_MODEL,
         ),
-        ollama_temperature=_float_env("JARVIS_OLLAMA_TEMPERATURE", 0.35),
+        ollama_temperature=_float_env("JARVIS_OLLAMA_TEMPERATURE", DEFAULT_OLLAMA_TEMPERATURE),
         ollama_max_tokens=_int_env("JARVIS_OLLAMA_MAX_TOKENS", 96),
         ollama_keep_alive=os.getenv("JARVIS_OLLAMA_KEEP_ALIVE", DEFAULT_OLLAMA_KEEP_ALIVE),
         kokoro_voice=os.getenv("JARVIS_KOKORO_VOICE", DEFAULT_KOKORO_VOICE),
@@ -76,6 +84,11 @@ def load_config(env_file: str | None = None) -> AppConfig:
         ollama_prewarm_enabled=_bool_env("JARVIS_OLLAMA_PREWARM_ENABLED", False),
         echo_suppression_enabled=_bool_env("JARVIS_ECHO_SUPPRESSION_ENABLED", True),
         echo_suppression_release_ms=_int_env("JARVIS_ECHO_SUPPRESSION_RELEASE_MS", 350),
+        vad_start_secs=_float_env("JARVIS_VAD_START_SECS", 0.2),
+        vad_stop_secs=_float_env("JARVIS_VAD_STOP_SECS", 0.2),
+        filter_incomplete_user_turns=_bool_env("JARVIS_FILTER_INCOMPLETE_USER_TURNS", True),
+        incomplete_short_timeout=_float_env("JARVIS_INCOMPLETE_SHORT_TIMEOUT", 6.0),
+        incomplete_long_timeout=_float_env("JARVIS_INCOMPLETE_LONG_TIMEOUT", 12.0),
     )
 
 
@@ -110,4 +123,4 @@ def _bool_env(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
 
-    return default
+    raise ValueError(f"Valor booleano invalido para {name}: {raw}")

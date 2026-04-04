@@ -123,7 +123,8 @@ def _run_devices() -> int:
 async def _run_transcribe(config: AppConfig) -> int:
     from pipecat.pipeline.runner import PipelineRunner
 
-    from .pipeline import build_transcribe_task, prepare_stt_config
+    from .pipeline import build_transcribe_task
+    from .warmup import prepare_stt_config
 
     config = prepare_stt_config(config)
 
